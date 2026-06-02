@@ -1,0 +1,12 @@
+# GPU-only requirements. Install in addition to requirements.txt.
+# Pick the torch wheel matching your CUDA version.
+
+torch>=2.3
+transformers>=4.45
+sentence-transformers>=3.0
+accelerate>=0.30
+peft>=0.12
+trl>=0.10
+einops
+bitsandbytes  # optional: for 4-bit/8-bit loading
+# flash-attn  # uncomment after installing torch; needs nvcc

@@ -1,0 +1,20 @@
+# Pinned to versions known-cached on lrl-pypi-remote-cache.
+# These same versions work on any standard PyPI mirror.
+datasets==2.19.0
+pandas==2.2.3
+numpy==2.2.6
+scipy==1.16.0
+tqdm==4.67.3
+huggingface_hub==0.26.2
+pyarrow==20.0.0
+pyarrow_hotfix==0.6
+omegaconf>=2.3
+multiprocess==0.70.17
+typing_extensions>=4.12
+
+# For GPU experiments only (don't install on CPU host):
+#   torch>=2.3
+#   transformers>=4.45
+#   sentence-transformers>=3.0
+#   accelerate>=0.30
+#   flash-attn  # optional, large speedup on H100/A100

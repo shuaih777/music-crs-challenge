@@ -1,0 +1,33 @@
+# OS / editor noise
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Python venvs / build
+.venv/
+venv/
+env/
+*.egg-info/
+build/
+dist/
+
+# HuggingFace + cache directories
+.cache/
+cache/
+.hf_cache/
+
+# Large generated / transient artifacts
+exp/inference/devset/*.json.tmp
+
+# Don't ship the upstream nlp4musa clones — see README for clone instructions
+music-crs-baselines/
+music-crs-evaluator/
+
+# But we do keep our own outputs in exp/ (small JSONs, useful for comparison)
+!exp/inference/
+!exp/scores/
+!exp/ground_truth/
