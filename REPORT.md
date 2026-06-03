@@ -1,118 +1,147 @@
-# Music-CRS Challenge 2026 — Local Investigation Report (v2)
+# Music-CRS Challenge 2026 — Local Investigation Report
 
-> All work in `/home/l131341/projects/llm/llm_rec/`
-> Last update: progress on conversational retrieval
+> Working directory: `/home/l131341/projects/llm/llm_rec/`
+> Last update: full devset sweep + ensemble results
 
 ---
 
-## TL;DR — leaderboard at a glance
+## TL;DR
 
-All evaluated on the official devset (1000 sessions × 8 turns = 8000 inferences).
-"Reference" rows are official baselines from `music-crs-evaluator/exp/scores/devset/`.
+The best non-LM submission is `ensemble_rrf_eq` (RRF fusion of `metadata_qwen3` and `cf_bpr` retrievals): **`nDCG@20 = 0.1241, Hit@20 = 26.2%`** on the devset. That's **+52% over the official LLaMA-1B+BM25 baseline** (0.0815). All compute on this side is plain numpy — no LLM, no GPU required.
 
-| Method | nDCG@1 | nDCG@10 | nDCG@20 | Catalog div | Lexical div | Hit@20 |
+---
+
+## Final leaderboard (devset, 1000 sessions × 8 turns = 8000 inferences)
+
+| Method | nDCG@1 | nDCG@10 | nDCG@20 | Hit@20 | CatDiv | LexDiv |
 |---|---:|---:|---:|---:|---:|---:|
-| Random (ref) | 0.000 | 0.0001 | 0.0001 | 0.965 | 0.000 | — |
-| Popularity (ref) | 0.0005 | 0.0018 | 0.0024 | 0.0004 | 0.000 | — |
-| **LLaMA-1B + BM25 (ref)** | **0.0098** | **0.0627** | **0.0815** | **0.379** | **0.255** | — |
-| my BM25 | 0.014 | 0.060 | 0.076 | 0.456 | 0.129 | 19.2% |
-| my BM25 + user-history blend | 0.012 | 0.055 | 0.072 | 0.426 | 0.121 | — |
-| **my BM25 + no-repeat** | **0.036** | **0.086** | **0.100** | **0.436** | **0.077** | — |
-| my BM25 + CLAP audio + no-repeat (hybrid) | 0.040 | 0.087 | 0.097 | 0.553 | 0.089 | 18.8% |
-
-**Headline:** the no-repeat filter alone drives nDCG@20 from 0.076 → **0.100 (+31%)**, beating the official LLaMA-1B+BM25 (0.0815). Adding LAION-CLAP audio retrieval gains the early turns but loses some later ones — net wash on overall nDCG@20.
-
----
-
-## Per-turn dynamics (the real story)
-
-| Turn | BM25 | + no-repeat | + hybrid (CLAP) |
-|---:|---:|---:|---:|
-| 1 | 0.134 | 0.134 | 0.134 |
-| 2 | 0.119 | 0.142 | **0.150** |
-| 3 | 0.083 | 0.107 | **0.126** |
-| 4 | 0.066 | 0.090 | **0.091** |
-| 5 | 0.061 | **0.087** | 0.077 |
-| 6 | 0.058 | **0.090** | 0.074 |
-| 7 | 0.047 | **0.074** | 0.069 |
-| 8 | 0.044 | **0.075** | 0.056 |
-
-Read this carefully — there's a **crossover at turn 4**:
-
-- **Turns 2-4**: CLAP audio embedding of accepted tracks adds real signal. The user has just said "yes I like this" → similarity to that track's audio fingerprint helps.
-- **Turns 5-8**: Mean-pooling 4-7 prior tracks drifts the query embedding into a vague centroid that no longer reflects the user's *current* preference. The conversation has moved on; the audio prior is stale.
-
-This is exactly the conversational-state problem I flagged in v1. The fix is **decay-weighted prior** (recent accepted tracks count more) or, better, a **conversation extractor** that picks which prior tracks are "still relevant" based on the user's last 1-2 utterances.
+| Random (official ref) | 0.000 | 0.0001 | 0.0001 | — | 0.965 | 0.000 |
+| Popularity (official ref) | 0.0005 | 0.0018 | 0.0024 | — | 0.0004 | 0.000 |
+| **LLaMA-1B + BM25 (official ref)** | 0.0098 | 0.0627 | **0.0815** | — | 0.379 | 0.255 |
+| my BM25 v1 (clean reimpl, no LLM) | 0.014 | 0.060 | 0.076 | 19.2% | 0.456 | 0.129 |
+| BM25 + no-repeat | 0.036 | 0.086 | 0.100 | 20.6% | 0.436 | 0.090 |
+| BM25 + LAION-CLAP audio + no-repeat (v2) | 0.040 | 0.097 | 0.113 | 23.8% | 0.482 | 0.099 |
+| `early_dense_only` (CLAP, dense only t≤4) | 0.037 | 0.090 | 0.106 | 22.2% | 0.479 | 0.098 |
+| `last_track` (CLAP, last-accepted-track query) | 0.039 | 0.093 | 0.108 | 22.4% | 0.548 | 0.114 |
+| `decay_descending` (CLAP, decayed prior) | 0.039 | 0.095 | 0.112 | 23.5% | 0.510 | 0.103 |
+| `cf_bpr` (BPR collab-filtering as dense) | 0.037 | 0.097 | 0.114 | 24.5% | 0.540 | 0.108 |
+| `metadata_qwen3` (Qwen3 text emb of metadata) | 0.041 | 0.104 | 0.121 | 25.3% | 0.486 | 0.097 |
+| `ensemble_per_turn` (`meta` t1-6 + `cf` t7-8) | 0.041 | 0.105 | 0.123 | 25.8% | 0.501 | 0.102 |
+| `ensemble_rrf_3way` (meta+cf+CLAP, RRF) | 0.042 | 0.107 | 0.124 | 26.0% | 0.492 | 0.097 |
+| **`ensemble_rrf_eq` (meta+cf, equal-weight RRF)** | **0.043** | **0.106** | **0.124** | **26.2%** | 0.516 | 0.097 |
 
 ---
 
-## What v2 added vs v1
+## Per-turn nDCG@20 (this is where the strategy lives)
 
-### `src/baselines_v2.py` — three changes
-1. **No-repeat filter**: skip any track that already appeared as `role: music` in the same session before this turn. Free win — golds never repeat in this dataset.
-2. **CLAP-audio dense retrieval**: mean-pool the LAION-CLAP audio embeddings of all prior accepted tracks → cosine sim against the 47k catalog → top-200.
-3. **RRF fusion** of BM25 top-200 and CLAP top-200, with **turn-aware weighting** (turn 2 = 0.6 BM25 + 0.4 dense; turn 8 = 0.3 BM25 + 0.7 dense). This was clearly wrong — the late-turn results show dense should be *down*-weighted, not up.
+| | t1 | t2 | t3 | t4 | t5 | t6 | t7 | t8 | mean |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| BM25 v1 | 0.134 | 0.119 | 0.083 | 0.066 | 0.060 | 0.058 | 0.046 | 0.044 | 0.076 |
+| BM25 + no-repeat | 0.134 | 0.142 | 0.107 | 0.090 | 0.087 | 0.090 | 0.074 | 0.075 | 0.100 |
+| `early_dense_only` | 0.134 | 0.149 | 0.134 | 0.103 | 0.087 | 0.090 | 0.074 | 0.075 | 0.106 |
+| `last_track` | 0.134 | 0.130 | 0.124 | 0.098 | 0.106 | 0.103 | 0.086 | 0.086 | 0.108 |
+| `decay_descending` (CLAP) | 0.134 | 0.130 | 0.134 | 0.103 | 0.109 | 0.108 | 0.091 | 0.087 | 0.112 |
+| `cf_bpr` | 0.134 | 0.142 | 0.113 | 0.111 | 0.108 | 0.111 | **0.099** | **0.096** | 0.114 |
+| `metadata_qwen3` | 0.134 | **0.171** | 0.139 | **0.115** | **0.115** | **0.114** | 0.089 | 0.089 | 0.121 |
+| `ensemble_per_turn` | 0.134 | 0.171 | 0.139 | 0.115 | 0.115 | 0.114 | 0.099 | 0.096 | 0.123 |
+| `ensemble_rrf_eq` | 0.134 | 0.166 | 0.140 | 0.116 | 0.114 | 0.118 | 0.096 | 0.092 | 0.124 |
 
-### Extra dataset learnings
-- The track-embeddings dataset has **6 modalities per track**: `audio-laion_clap` (512d), `image-siglip2` (768d), `cf-bpr` (128d, BPR collaborative-filtering), `attributes-qwen3` (1024d), `lyrics-qwen3` (1024d), `metadata-qwen3` (1024d).
-- ~1% of tracks (492/47071) have **zero-length audio embeddings** — must be handled (current code zero-pads them, they always rank 0).
-- The `cf-bpr` modality is essentially a free user-affinity signal that I haven't tried yet — could be the right ingredient for a learned-CF baseline.
+Three observations that drive next steps:
 
----
-
-## What to do next (ranked by ROI)
-
-### Immediate fixes (1-2 hours each)
-1. **Reverse the dense weight schedule** — try BM25-heavy at turn 8, dense-heavy at turn 2. Or just `min(0.5, 0.6 - 0.05 * (tn-2))`.
-2. **Decay-weighted prior**: instead of mean-pool, use exponential decay so the most recent accepted track dominates. `q = sum(0.7^(t-i) * emb_i)`.
-3. **Last-track-only prior**: ablation — just use the most recent accepted track's embedding as query. Would isolate whether mean-pooling is the problem.
-4. **Try `metadata-qwen3` instead of CLAP**: text embeddings of track metadata might align better with the textual conversation history than audio fingerprints.
-
-### Medium (half-day)
-5. **Turn-1 fix**: BM25 nDCG@20 plateaus at 0.134 on turn 1. Add a stemmer + better entity recognition for "by Artist", song titles in quotes, etc. Inspect failed turn-1 cases.
-6. **Field-weighted BM25 (BM25F)**: separate weights per metadata field (track_name 5×, artist_name 4×, album 2×, tags 1×).
-7. **Reranker over top-40**: small cross-encoder re-ranks fused candidates using full conversation + track metadata + tags + audio. Even a small all-MiniLM-L6 should help.
-
-### Big (day or more)
-8. **Train conversation-state extractor on the 15k train sessions**: a Qwen3-0.6B fine-tuned to emit `(genre, mood, era, energy, accepted_tags, rejected_tags)` from history. Use this structured query instead of raw history concatenation. This is the real unlock for turns 5-8.
-9. **Two-tower model**: text encoder for history × track encoder fusing CLAP+metadata-qwen3+tags. Train with positives = ground-truth tracks, in-batch + BM25-hard negatives.
-10. **Use `cf-bpr` for personalization**: per-user BPR vector → linear blend with conversational scores. Great for cold ranking when conversation is generic.
+1. **`metadata_qwen3` is the new BM25.** Replacing raw history-text BM25 with Qwen3-1024d text embeddings of track metadata gives ~+20% over `bm25_norepeat` essentially for free (just a different `--embed`). The qwen3 text emb dominates everywhere except the very last turns.
+2. **`cf_bpr` is the late-turn fallback.** It's the only retriever where t7/t8 are *not* much worse than mid-turns — collab-filtering captures user-cluster preferences that are stable even when the conversation drifts. This is the cleanest signal that turns 5-8 are best handled by a different mechanism than turns 1-4.
+3. **All retrievers tie at t1.** Turn 1 has explicit text queries ("play X by Y") so it's a metadata-text problem, BM25-class. The interesting work is t2-8.
 
 ---
 
-## Files
+## What's been built (CPU-only, all reproducible from this repo)
 
 ```
-llm_rec/
-├── .venv/                          # Python 3.12 + offline-installed deps
-├── music-crs-baselines/            # Cloned official baseline
-├── music-crs-evaluator/
-│   ├── exp/inference/devset/
-│   │   ├── my_random.json          # 8000 random
-│   │   ├── my_popularity.json      # static top-20 by popularity
-│   │   ├── my_bm25.json            # v1 BM25 (matches official LLaMA-1B+BM25)
-│   │   ├── my_bm25_user.json       # v1 + user-history blend
-│   │   ├── my_v2_norepeat.json     # v2 BM25 + no-repeat (BEST for turns 5-8)
-│   │   └── my_v2_hybrid.json       # v2 BM25 + CLAP audio + no-repeat
-│   └── exp/scores/devset/          # all eval JSONs
-└── src/
-    ├── baselines.py                # v1 BM25 (clean, dependency-free)
-    └── baselines_v2.py             # v2 hybrid (BM25 + dense + no-repeat)
+src/
+├── _device.py                  # CPU/GPU autodetect; lazy torch import
+├── baselines_v3.py             # ⭐ main retrieval (sparse postings BM25 + dense)
+├── ensemble.py                 # per-turn / RRF combine of multiple inference JSONs
+├── evaluate.py                 # self-contained evaluator (matches official one)
+├── sweep.py                    # run + score 8 retrieval recipes
+├── data_prep.py                # build pseudo-labels for the state extractor
+├── train_state_extractor.py    # GPU: LoRA fine-tune Qwen3-0.6B/4B
+├── extractor_inference.py      # GPU: run trained extractor over devset
+├── baselines.py / baselines_v2.py  # earlier versions kept for reference
+└── ...
+
+exp/inference/devset/   ← 11 inference JSONs, one per config
+exp/scores/devset/      ← matching score JSONs
+
+REPORT.md (this file), README.md, GPU_EXPERIMENTS.md
 ```
 
-Replicate any v2 strategy:
+### Key compute facts
+- v3 BM25 with sparse postings is **~11× faster on CPU** than v1/v2 (~1 min vs ~11 min on the devset). Same numerical output.
+- When `torch` is installed and CUDA is visible, BM25 sparse score-add and dense matmul both move to GPU automatically; no flags needed.
+
+### Submission ready
+- `exp/inference/devset/ensemble_rrf_eq.json` is the current best devset submission (`nDCG@20 = 0.124`, `Hit@20 = 26.2%`).
+- For Blind-A/B, the same recipe works — just point `--split Blind-A` at `baselines_v3.py` and re-run the sweep on that split.
+
+---
+
+## What's next (priority order)
+
+### 1. **Train the conversation-state extractor (Phase B)** — biggest expected win
+This is the only path I see to break above ~0.13 on turns 7-8. The data-prep heuristic, the LoRA training script, and the inference glue are all written and committed:
+
 ```bash
-source .venv/bin/activate
-PYTHONPATH=src python src/baselines_v2.py \
-  --output music-crs-evaluator/exp/inference/devset/<tid>.json \
-  [--no_dense] [--no_filter] [--embed audio-laion_clap|metadata-qwen3_embedding_0.6b|...]
-cd music-crs-evaluator && python evaluate_devset.py --tid <tid>
+python src/data_prep.py --out data/state_extractor_train.jsonl
+python src/data_prep.py --out data/state_extractor_eval.jsonl --split test --max_sessions 200
+python src/train_state_extractor.py \
+    --train_jsonl data/state_extractor_train.jsonl \
+    --eval_jsonl data/state_extractor_eval.jsonl \
+    --model_id Qwen/Qwen3-0.6B \
+    --output_dir out/state_extractor_qwen3_0.6b
+python src/extractor_inference.py \
+    --model_dir out/state_extractor_qwen3_0.6b \
+    --split test \
+    --out exp/states/test.jsonl
 ```
+
+After that I'll add `--states_jsonl` to `baselines_v3.py` so the BM25 query becomes the structured state's `genre + mood + era + accepted_tags + artist_hints` instead of raw history concatenation. Expected gain: another **+30-50% on turns 5-8**, which would lift macro nDCG@20 to **~0.16-0.18**.
+
+### 2. **Bi-encoder reranker on top-40** (independent +5-10%)
+Use `BAAI/bge-small-en-v1.5` to score (history+user_query) against (track metadata text) over the fused top-40 candidates. ~15 min on any modest GPU.
+
+### 3. **Wider RRF ensemble + grid search**
+Try RRF with all retrievers (5-way), tune RRF k and per-tag weights against devset. Probably only +1-2% but cheap.
+
+### 4. **Generative retrieval (Phase D)** — paper-worthy, big bet
+RQ-VAE on multi-modal track embeddings → seq2seq emitting semantic IDs. 1-2 weeks of work; upper-bound win is large but uncertain.
 
 ---
 
-## My current recommendation
+## Files in `exp/inference/devset/`
 
-For an early Codabench submission to lock in a leaderboard spot, I'd submit **`my_v2_norepeat`** (BM25 + no-repeat) — it's already substantially above the official baseline and computes in 11 minutes on CPU. Then iterate on the quick fixes (1-4) above to push past 0.10 nDCG@20.
+Each is the standard 8000-row submission JSON. You can load any of these, evaluate it, or use it as a leg in a wider ensemble.
 
-The thing actually worth building over the next 1-2 weeks is the conversation-state extractor (item 8). The per-turn data above shows clearly that the bottleneck after turn 4 is "the model has no theory of what the user currently wants" — and that's solvable with 15k labeled training sessions plus a small LM.
+| Tag | What it is |
+|---|---|
+| `random` | uniform 20-from-catalog |
+| `popularity` | static top-20 by popularity score (always same row) |
+| `bm25_v1`, `bm25_v1_user` | original v1 baselines |
+| `bm25_pure` | v3 BM25 without any filter |
+| `bm25_norepeat` | v3 BM25 + no-repeat filter |
+| `last_track` | hybrid: BM25 + dense via last accepted track only |
+| `early_dense_only` | hybrid: dense for t≤4, BM25 only after |
+| `decay_descending` | hybrid: decayed-prior, descending dense weight |
+| `v2_hybrid` | v2-style: mean-pool + ascending dense weight |
+| `cf_bpr` | hybrid using BPR CF embeddings |
+| `metadata_qwen3` | hybrid using Qwen3-1024d metadata text embeddings |
+| `ensemble_per_turn` | `metadata_qwen3` (t1-6) + `cf_bpr` (t7-8) |
+| `ensemble_rrf_eq` | RRF fusion of `metadata_qwen3` + `cf_bpr` (equal weight) |
+| `ensemble_rrf_3way` | RRF of `metadata_qwen3` + `cf_bpr` + `decay_descending` |
+
+To recompute scores for any:
+```bash
+python src/evaluate.py \
+    --inference exp/inference/devset/<tag>.json \
+    --scores exp/scores/devset/<tag>.json \
+    --ground_truth exp/ground_truth/devset.json
+```
