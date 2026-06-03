@@ -1,0 +1,186 @@
+{
+  "diagnosis": {
+    "bottlenecks": [
+      {
+        "observation": "Recall ceiling is the dominant problem: Hit@20 = 26.2% in the best system means 73.8% of (session, turn) pairs never even retrieve the gold track into the top 20. nDCG@20 (0.124) is therefore upper-bounded at ~0.124/0.262 ≈ 0.473 conditional-on-hit; further reranking of the existing fused top-20 cannot lift macro nDCG@20 above ~0.31 even with a perfect oracle. A wider candidate net (top-100 or top-200 fused, then rerank) is required before any reranker can pay off.",
+        "implication": "Increase candidate pool: keep --topk_fuse=200 internally but emit top-100 from each leg into RRF, then rerank. Add complementary retrievers (audio-CLAP, lyrics-Qwen3, attributes-Qwen3, image-SigLIP2, user-embedding × track) so their union covers more gold tracks. Recall-oriented evaluation (Hit@100, Hit@200 per leg) should drive retriever selection, not nDCG@20 of each leg in isolation.",
+        "severity": "blocker"
+      },
+      {
+        "observation": "Per-turn collapse: every retriever degrades monotonically from t1 (0.134) to t8 (0.09-0.10), and the late-turn winner switches from metadata_qwen3 to cf_bpr at t7. This is the classic 'history concatenation drowns the current intent' problem — BM25 over the whole transcript and mean/decay pooling over all prior tracks both wash out the user's most recent steer. Even decay (alpha=0.7) loses signal because the dense legs use track-side semantics rather than the *current user utterance*.",
+        "implication": "Use user-side intent extraction at every turn. Two cheap moves before training a state-extractor LM: (a) BM25 / dense-encode ONLY the current user_query (turn-t utterance) instead of full history, and ensemble that 'current-intent' leg with the 'history-context' leg per-turn; (b) detect explicit pushback regex ('not that', 'different', 'no', 'something else') and either negate the last accepted-track vector from the dense query or drop it from the prior_idx pool. The full LoRA-trained Qwen3 state extractor (Phase B) is the principled fix but a regex/heuristic version should land +1-2 nDCG points overnight.",
+        "severity": "major"
+      },
+      {
+        "observation": "Only 1 of 6 track-embedding modalities is wired into the best ensemble. attributes-qwen3 (1024d), lyrics-qwen3 (1024d), image-siglip2 (768d), and audio-laion_clap (512d) are all unused in ensemble_rrf_eq. The 3-way (meta+cf+CLAP) only nudged nDCG@20 from 0.1241 to 0.1237 — actually lost — because CLAP was added with equal RRF weight and its solo nDCG (0.114, hit@20 23.8%) dragged the fusion. That's a tuning failure, not a signal failure: each modality individually has 22-25% Hit@20 with largely *different* misses, so their union should push Hit@20 well above 35-40% if RRF weights and rrf_k are tuned per-leg per-turn.",
+        "implication": "Run a 6-way RRF sweep over {metadata-qwen3, attributes-qwen3, lyrics-qwen3, audio-laion_clap, image-siglip2, cf-bpr} with grid-searched per-leg weights and per-turn weights (use devset to pick). Lyrics and attributes are particularly promising: lyrics catches mood/theme queries that metadata text misses; attributes is the closest text-side proxy to genre/mood/era and should excel on attribute-driven turns. Also evaluate Hit@100 per modality to estimate the ceiling of a wide RRF + rerank stack.",
+        "severity": "major"
+      },
+      {
+        "observation": "Turn 1 nDCG (0.134) is identical for ALL retrievers — including BM25-v1. This means t1 is a pure metadata-text-match problem ('play X by Y') and the ceiling there is set by name/artist normalization, NOT by retrieval algorithm. 0.134 nDCG@1=??? — very low for a literal-name-lookup turn, which strongly suggests tokenization/string-match issues (artist name with apostrophes, accents, multi-artist comma-joins, parenthetical version tags 'Remastered 2011', stop-word removal stripping useful tokens like 'the'). The current tokenizer drops 'the', 'a', 'song' and keeps only [A-Za-z0-9]+ — guaranteed to fail on 'Beyoncé', 'Sigur Rós', 'AC/DC', '$uicideboy$'.",
+        "implication": "Add a 'literal match' turn-1 leg: exact normalized match (lowercase, strip diacritics with unidecode, strip parenthetical version suffixes, n-gram fallback) on track_name + artist_name; combine with BM25 only when literal match has no hit. Switch tokenizer to unicode-aware (\\w+ with NFKD normalization). Expected free win: t1 nDCG should jump from 0.134 to 0.20+ given the 'play X by Y' pattern of t1 utterances.",
+        "severity": "major"
+      },
+      {
+        "observation": "User-side embeddings (TalkPlayData-Challenge-User-Embeddings) and user_id are completely unused in retrieval. Currently user_id only flows through to the output JSON. CF-BPR works as a track-track CF (mean-pool of accepted-track BPR vectors) — the user's own learned representation is ignored, even though it's the single most stable preference signal. This is why cf_bpr only catches up to metadata_qwen3 at t7-8, when there's enough accepted-history to mean-pool reliably.",
+        "implication": "Add a 'user-embedding' retriever leg: cosine(user_emb[user_id], track_emb_modality) for each modality. Combine the user-vector retrieval with prior-track-pooled retrieval (e.g. q = 0.5 * user_vec + 0.5 * decay_pool(prior)). This should be strongest exactly at t1-t2 where prior-track history is empty/short, AND should lift the floor on t7-t8 when the conversation drifts. It is also the right way to handle the 'cold conversation, warm user' regime.",
+        "severity": "major"
+      },
+      {
+        "observation": "Pure score-add ensemble (current code's normalize-and-add path inside baselines_v3.py) and the external RRF in ensemble.py operate on different score spaces and weight conventions, and neither was tuned: ensemble_rrf_eq uses k=60 default and weights=[1,1] without sweep, the per-turn ensemble is hand-coded to '1-6:meta, 7-8:cf' from a 7-row table. The gap between ensemble_per_turn (0.1234) and ensemble_rrf_eq (0.1241) is 0.6% — both are leaving fusion gain on the table.",
+        "implication": "Two parallel improvements: (a) per-turn-per-leg weight grid (8 turns × N legs × handful of weights, dev-tuned, very cheap) — should yield +2-4%; (b) replace RRF with weighted Borda or learned linear blend (logistic regression on dev with features = [rank_in_each_leg, score_in_each_leg, turn_number, history_len, has_pushback_in_user_query]) — small learned reranker over the union of top-100s.",
+        "severity": "minor"
+      },
+      {
+        "observation": "All inference is 'session-stateless within turn' — each (session_id, turn_t) pair is computed independently from raw history. There's no caching of the per-session conversation embedding, no incremental update of pooled vectors across t=1..8. This means duplicated computation but more importantly, the model never builds a per-session 'consistent state' — each turn re-reads the raw transcript and re-tokenizes it. Pushback at t=5 doesn't update what the system 'remembers' the user accepted at t=3.",
+        "implication": "Maintain a per-session running state (accepted_tags Counter, rejected_tags Counter, last_user_query_emb, weighted_user_pref vector). Update it incrementally each turn. Expose it both to retrieval (query construction) and to a future LLM response generator. This is the right substrate for the Phase B state extractor anyway — train it on the running state, not raw transcripts.",
+        "severity": "minor"
+      },
+      {
+        "observation": "No reranker exists at all. The fused top-20 is shipped as-is. Yet 73.8% of misses + 47.3% of conditional-on-hit nDCG points lost suggests a reranker over union(top-100) of all legs would buy a lot if it had access to richer features (cross-modal track features, user embedding, current-utterance embedding, BM25 signal, CF score).",
+        "implication": "Train a small gradient-boosted ranker (LightGBM) on the 15,199 train sessions × 8 turns: features per (track, turn) = rank-in-each-leg, score-in-each-leg, cosine(user_emb, track_emb_*), turn_number, prior_track_count, tag-overlap-with-accepted-tags, jaccard(track_tags, regex-extracted-query-tags). Label = 1 for the gold track. ~120k positives + sampled negatives from union(top-100). 30 minutes to train, applied at inference over the top-100 union. Expected: +20-40% nDCG@20.",
+        "severity": "major"
+      }
+    ],
+    "untapped_signals": [
+      "attributes-qwen3 (1024d) embedding — text encoder of structured tags/genre/mood/era; closest semantic match to the 'genre+mood+era+tag' query that the planned state extractor would emit. Should be the single best dense retriever after the state extractor lands; right now completely unused in any leg or ensemble.",
+      "lyrics-qwen3 (1024d) embedding — captures mood/theme/topic content of songs. Many user utterances are about feeling/situation ('something for studying', 'sad rainy evening') which lyrics-emb will match better than metadata-emb. Completely unused.",
+      "image-siglip2 (768d) album-art embedding — surprisingly strong proxy for genre/era/aesthetic in music recommendation literature; unused.",
+      "audio-laion_clap (512d) — present in the 3-way RRF but at equal weight with the much-stronger meta/cf legs, which dragged the fusion. Properly down-weighted (or used only where audio matters: timbre/genre queries) it should add unique recall.",
+      "User embeddings (TalkPlayData-Challenge-User-Embeddings) — the entire user-side dataset is loaded only to pass user_id through. Not used as a retrieval signal, not used as a prior, not used as a turn-1 cold-start backbone.",
+      "User metadata (TalkPlayData-Challenge-User-Metadata, 8,772 users) — demographic/preference fields completely unused.",
+      "Pushback / negative-feedback regex on user utterances — the current pipeline only does no-repeat filtering on already-recommended tracks; it does not detect 'no, something else', 'different artist', 'too slow', etc. Even a simple regex would let us (a) downweight or negate the last system-recommended track in the dense query, (b) flag the next system-recommended tag as rejected for the rest of the session.",
+      "Current-turn user utterance, in isolation — currently fused into the full-history concatenation and then BM25-tokenized, so it gets diluted across t=2..8. Encoding the current utterance alone and running a parallel retrieval leg from it (especially with attributes-qwen3 or lyrics-qwen3) is the minimum viable 'state extractor'.",
+      "Train-split sessions (15,199 × 8 = ~121k turns of supervised retrieval pairs) — used only for pseudo-labels in the un-trained state-extractor pipeline. Could directly train (a) a LightGBM reranker over union(top-100), (b) a learning-to-rank linear blend of leg scores, (c) a small two-tower bi-encoder fine-tuned on (history -> gold_track) pairs.",
+      "Tag/genre/era ground-truth signal from accepted tracks in train sessions — beyond pseudo-labels, useful as direct labels for a multilabel classifier 'predict next track's genre/mood/era from history' (small MLP, fast); the predictions become explicit re-rank features.",
+      "Conversation structure (turn role pattern, system-then-user back-and-forth) — currently flattened into 'system: recommended X by Y / user: ...'. Treating system turns differently (their tracks are the *system's* offerings, not the user's preferences until accepted) is unexploited; explicit accept/reject classification of each prior turn would clean the prior_idx pool.",
+      "Track-track co-occurrence in train sessions — sessions list ~8 tracks each accepted by the same user in the same conversation, a perfect playlist-cooccurrence signal. Build a track-track PMI / item2item matrix from train sessions; retrieve via 'tracks frequently co-listened-with my prior_idx'. This is a much stronger session-level CF than the global BPR vector for late turns.",
+      "Release date / era field on tracks — only crudely used as 'first 4 chars of release_date' as a BM25 token. No numeric era feature, no era-similarity in dense retrieval, no era-prior from accepted tracks.",
+      "Popularity score per track — used only by the 'popularity' baseline (which is awful as a ranker), not as a tie-breaker / Bayesian prior on the final ranking. Adding small log-popularity to fused scores is a known small win when many tail candidates are tied.",
+      "Predicted_response slot — currently a hand-templated string. The challenge evaluates lexical and category diversity of responses; an actual generator over the top-1 metadata could tighten lexical diversity (currently 0.097 — well below the LLaMA baseline's 0.255) and possibly affect downstream eval signals."
+    ]
+  },
+  "method_findings_count": 75,
+  "repo_findings_count": 52,
+  "ranked_recommendations": [
+    {
+      "rank": 1,
+      "name": "Wide-net 6-modality RRF with per-leg/per-turn weight sweep + Hit@100 selection",
+      "one_line": "Wire all 5 unused track-embedding modalities (attributes-qwen3, lyrics-qwen3, image-siglip2, audio-laion_clap, plus user-embedding x track) into RRF, push fuse depth from 20 to 100/200, and grid-search per-leg + per-turn weights on the dev set.",
+      "why_for_us": "Hit@20 = 26.2% is the hard ceiling — no reranker can fix that. Each modality has 22-25% Hit@20 on largely disjoint misses, so their union should push Hit@100 well past 40-50%. The current 3-way (meta+cf+CLAP) lost nDCG only because CLAP got equal RRF weight; that is a tuning failure, not a signal failure. This is the prerequisite for every other recommendation below.",
+      "how_to_start": "Add five new retriever legs in src/baselines_v3.py that mirror the existing dense-retrieval path but swap the modality file (attributes-qwen3.npy, lyrics-qwen3.npy, image-siglip2.npy, audio-laion_clap.npy). In src/ensemble.py raise topk_fuse=200 and emit top-100 per leg into RRF. Add a tiny grid-search script src/sweep_rrf.py that loops weights in {0,0.25,0.5,1,2} per leg, per-turn buckets {1, 2-4, 5-6, 7-8}, and reports Hit@100 / nDCG@20 on dev. Pick best-by-turn config.",
+      "effort": "days",
+      "gpu_needed": "small",
+      "expected_lift": "+0.020 to +0.040 nDCG@20 (0.124 -> 0.145-0.165) — primarily by lifting Hit@20 from 26% to ~35-40%",
+      "source_urls": [
+        "https://arxiv.org/abs/2210.11934",
+        "https://arxiv.org/abs/2502.13713"
+      ]
+    },
+    {
+      "rank": 2,
+      "name": "Current-utterance-only retrieval leg + pushback regex (cheap state extractor)",
+      "one_line": "Add a parallel retrieval leg that encodes ONLY the turn-t user utterance (with attributes-qwen3 and lyrics-qwen3) and a regex pushback detector that drops/negates the last system-recommended track from the prior pool.",
+      "why_for_us": "Direct fix for the turn 5-8 collapse — every retriever degrades monotonically because full-history concatenation drowns the current intent. attributes-qwen3 is the closest text-side proxy to the genre/mood/era language users actually use at turn 5+. Costs zero GPU training and lands before the LoRA state-extractor.",
+      "how_to_start": "In src/baselines_v3.py, add build_query_current_only(turn) that takes ONLY the latest user_query string and encodes it with the already-downloaded Qwen3-Embedding model. Add a regex set ('not that', 'different', 'no', 'something else', 'too \\w+', 'less \\w+') in src/data_prep.py; if matched at turn t, subtract 0.5 * embedding(last_recommended_track) from the dense query and remove it from prior_idx. Ensemble this 'current-intent' leg into the RRF from rec #1 with higher weight at turns >= 5.",
+      "effort": "hours",
+      "gpu_needed": "small",
+      "expected_lift": "+0.010 to +0.020 nDCG@20 overall, concentrated on turns 5-8 (0.09-0.10 -> 0.12+)",
+      "source_urls": [
+        "https://arxiv.org/abs/2308.06212",
+        "https://arxiv.org/abs/2510.04812"
+      ]
+    },
+    {
+      "rank": 3,
+      "name": "LightGBM reranker over union(top-100) with cross-modal + user-embedding features",
+      "one_line": "Train a small LambdaRank LightGBM on the 15,199 train sessions (~121k turns) using rank-in-each-leg, score-in-each-leg, cosine(user_emb, track_emb_*), turn_number, prior_track_count, and tag-overlap as features.",
+      "why_for_us": "Once rec #1 lifts Hit@100 to ~50-60%, the conditional-on-hit ceiling rises and a learned blender that knows which leg to trust per-turn captures most of that headroom. Replaces the hand-coded '1-6:meta, 7-8:cf' table with a learned function. Train data is already there. ~30 min CPU training; ~50ms inference.",
+      "how_to_start": "Add src/train_ltr.py: load union(top-100) per (session, turn) from the rec #1 ensemble output on train sessions, label gold=1 / others=0, build feature matrix [rank_per_leg, score_per_leg, cos(user_emb, track_emb_meta/attr/lyrics/img/audio), turn_id, |prior|, jaccard(track_tags, regex_query_tags), log_popularity, era_diff]. Train LightGBM LambdaRank with group=session*turn. Apply at inference in baselines_v3.py over the top-100 union.",
+      "effort": "days",
+      "gpu_needed": "none",
+      "expected_lift": "+0.015 to +0.030 nDCG@20 conditional on rec #1 landing first",
+      "source_urls": [
+        "https://github.com/k-fujikawa/recsys-challenge-2024-1st-place",
+        "https://arxiv.org/abs/2502.07673"
+      ]
+    },
+    {
+      "rank": 4,
+      "name": "Turn-1 literal-match leg with unicode-aware normalization",
+      "one_line": "Add a normalized exact-match-then-BM25 leg keyed on track_name + artist_name with unidecode + parenthetical-suffix stripping; only fires when current utterance matches the 'play X by Y' pattern.",
+      "why_for_us": "Turn 1 nDCG = 0.134 across ALL retrievers is suspiciously low for what is mostly literal name lookup. The current tokenizer ([A-Za-z0-9]+ + stopword strip) guarantees failure on Beyoncé, Sigur Rós, AC/DC, $uicideboy$, 'The Beatles' (drops 'The'). Free win, no model training.",
+      "how_to_start": "In src/baselines_v3.py add normalize(s) = unidecode(s).lower() then strip /\\([^)]*remaster[^)]*\\)/, /\\([^)]*version\\)/, etc. Build two dicts: norm_track_name -> idx, (norm_artist, norm_track) -> idx. Add literal_match_leg: if current user_query matches r'(?:play|put on|listen to) (.+?) (?:by|from) (.+)' or similar, return exact-match indices first, else fall back to BM25 over normalized tokens with \\w+ regex. Fuse with weight only at turn 1.",
+      "effort": "hours",
+      "gpu_needed": "none",
+      "expected_lift": "+0.005 to +0.010 nDCG@20 overall (turn-1 nDCG: 0.134 -> 0.20+, weighted ~12.5% of metric)",
+      "source_urls": [
+        "https://arxiv.org/abs/2510.01698"
+      ]
+    },
+    {
+      "rank": 5,
+      "name": "Qwen3-Reranker-0.6B cross-encoder over top-100 union, instruction-conditioned on dialogue state",
+      "one_line": "Stage-2 cross-encoder rerank conditioned on the running dialogue state ('user has accepted X, rejected Y, current request: Z'); use Qwen3-Reranker-0.6B in fp16 on the A100.",
+      "why_for_us": "Listwise/cross-encoder rerank is the documented highest-ROI second stage when recall is healthy. Qwen3-Reranker is purpose-built for instruction-aware scoring, so the prompt 'rerank these tracks for a user who already accepted A,B,C and just said \"more upbeat\"' is exactly its sweet spot — directly attacks turn 5-8 drift. ~50ms/query for 100 candidates on A100; cheaper than RankZephyr-7B.",
+      "how_to_start": "pip install sentence-transformers>=5.0; download Qwen/Qwen3-Reranker-0.6B. Add src/rerank_qwen3.py with a function rerank(query_str, candidate_track_texts, top_k=20). Build the query string from the running state (rec #2's output) + current user_query. Run AFTER rec #1 (ensemble) and BEFORE/INSTEAD OF rec #3 (LightGBM) — or feed its score as an extra LightGBM feature.",
+      "effort": "days",
+      "gpu_needed": "small",
+      "expected_lift": "+0.010 to +0.025 nDCG@20, weighted toward turns 5-8",
+      "source_urls": [
+        "https://huggingface.co/Qwen/Qwen3-Reranker-4B",
+        "https://github.com/castorini/rank_llm",
+        "https://arxiv.org/abs/2312.02724"
+      ]
+    },
+    {
+      "rank": 6,
+      "name": "Session-level co-occurrence (item2item PMI) retriever leg",
+      "one_line": "Build a track-track co-occurrence/PMI matrix from the 15,199 training sessions (each session ~8 accepted tracks by the same user) and retrieve via mean-pool of accepted-track PMI rows.",
+      "why_for_us": "BPR-CF is a global pairwise signal; session co-occurrence is a much stronger session-level CF, especially at turn 5+ when 4-7 prior accepted tracks form a strong playlist fingerprint. Explains why cf_bpr only catches up at turn 7 — there's untapped session-CF structure orthogonal to BPR. CPU build, sub-millisecond inference.",
+      "how_to_start": "Add src/build_item2item.py: iterate train sessions, for each pair of accepted tracks increment a sparse coo matrix; compute PPMI with item-frequency. Save scipy.sparse.npz. In baselines_v3.py add a leg that, given prior_idx, returns top-N tracks by sum of PPMI rows. Fuse via RRF with higher weight at later turns.",
+      "effort": "hours",
+      "gpu_needed": "none",
+      "expected_lift": "+0.005 to +0.015 nDCG@20, concentrated at turns 4-8",
+      "source_urls": [
+        "https://github.com/antklen/recsys_challenge_2025"
+      ]
+    },
+    {
+      "rank": 7,
+      "name": "MuQ-MuLan replacement for LAION-CLAP audio modality",
+      "one_line": "Re-encode the catalog with Tencent MuQ-MuLan (700M, music-specific contrastive joint music/text) to replace audio-laion_clap, since LAION-CLAP's repo is dormant since 2023.",
+      "why_for_us": "Audio in the current 3-way RRF actively hurt because LAION-CLAP-512d is weaker than the other modalities. MuQ-MuLan is purpose-built for music tag/mood retrieval (the exact 'more upbeat / darker' refinement language at turn 5+) and shares a text/audio space, so query-side text encoding still works. Indexing the catalog is a one-time A100 job (~hours).",
+      "how_to_start": "pip install muq from OpenMuQ. Run a one-shot src/encode_muq_mulan.py over track audio previews -> save audio-muq_mulan.npy (768d). Add as a new leg in the rec #1 RRF; A/B against keeping LAION-CLAP. Use it primarily on turns >=3 where mood/tag refinements appear.",
+      "effort": "days",
+      "gpu_needed": "big",
+      "expected_lift": "+0.005 to +0.015 nDCG@20 (mainly via better Hit@100 on tag-driven queries)",
+      "source_urls": [
+        "https://arxiv.org/abs/2501.01108",
+        "https://github.com/tencent-ailab/MuQ"
+      ]
+    },
+    {
+      "rank": 8,
+      "name": "BGE-M3 unified dense+sparse+ColBERT leg for the conversational query side",
+      "one_line": "Replace the current BM25-only sparse leg with BGE-M3, which produces dense + sparse + ColBERT-style multi-vec from one forward pass over the same conversational text.",
+      "why_for_us": "Music-CRS turn utterances mix entity tokens ('AC/DC', 'Drake') with mood adjectives ('chill', 'upbeat') — the regime where naive BM25+dense fusion is most unstable. BGE-M3's three signals share a tokenizer/training distribution, which makes hybrid fusion behave better than independently-trained BM25+Qwen3. Drop-in via FlagEmbedding; pairs with bge-reranker-v2-m3 if Qwen3-Reranker (rec #5) is too heavy.",
+      "how_to_start": "pip install FlagEmbedding. In src/baselines_v3.py add a BGEM3FlagModel index over track_card_text (existing). Replace the BM25 leg with BGE-M3 sparse, add BGE-M3 dense as another leg, optionally use ColBERT multi-vec only on the top-200 from the dense leg as a cheap reranker. Compare Hit@100 against current BM25 leg before committing.",
+      "effort": "days",
+      "gpu_needed": "small",
+      "expected_lift": "+0.005 to +0.015 nDCG@20 (replaces a known-weak BM25 leg)",
+      "source_urls": [
+        "https://arxiv.org/abs/2402.03216",
+        "https://github.com/FlagOpen/FlagEmbedding"
+      ]
+    }
+  ],
+  "surprises": [
+    "LAION-CLAP is effectively abandoned (no checkpoints since April 2023). The community successor for music is MuQ-MuLan — meaning your unused audio-laion_clap modality is already on a dead-end stack and a one-time re-encode to MuQ-MuLan is strictly more future-proof, not just a marginal swap.",
+    "Turn 1 nDCG = 0.134 being IDENTICAL across BM25, metadata-qwen3, and cf-bpr is a smoking gun — not a retrieval-algorithm issue but a tokenizer/normalization bug (drops 'the', breaks on diacritics/AC/DC/$uicideboy$). A 1-hour unicode normalization fix could pay more than weeks of reranker work for turn 1.",
+    "The 3-way RRF (meta+cf+CLAP) actually LOST nDCG (0.1241 -> 0.1237) versus 2-way. This is widely interpreted as 'audio doesn't help', but the real cause is RRF with equal weight + k=60 default and no sweep — a tuning failure, not a signal failure. This means a multi-day weight sweep is competitive with multi-week neural reranker work.",
+    "User embeddings (TalkPlayData-Challenge-User-Embeddings) are loaded but completely unused — used ONLY to pass user_id through to JSON. The single most stable preference signal in the entire pipeline is being thrown away, and adding it as a retrieval leg explicitly attacks the t1-t2 cold-conversation regime AND the t7-t8 drift regime simultaneously.",
+    "Generative retrieval / TIGER / OneRec / HSTU look attractive on paper but ALL require training a new tokenizer + decoder under a 27-day deadline; the surprise is how much classic IR plumbing (RRF tuning, literal-match normalization, item2item PMI, LightGBM reranker, cross-encoder) is still on the table here and probably dominates them on ROI given the timeline.",
+    "Track-track session co-occurrence PMI from the 15k train sessions is essentially free and is a stronger session-CF signal than BPR for late turns, yet it is mentioned in the diagnosis but completely absent from the method/repo findings as a named technique — easy to overlook because it has no glamorous paper name."
+  ]
+}
