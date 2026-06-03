@@ -1,15 +1,20 @@
-"""GPU experiment: train a conversation-state extractor.
+"""Train a small LM as a music conversation-state extractor.
 
-Given the training set's ~15,200 conversations, fine-tune a small LM
-(default: Qwen3-0.6B) to map (history, user_query) -> structured query
-{genre, mood, era, energy, accepted_tags, rejected_tags}.
+Usage:
+    # 1. build training data (CPU only, ~1-2 min)
+    python src/data_prep.py --out data/state_extractor_train.jsonl
 
-Why: the per-turn nDCG analysis (REPORT.md) shows BM25-style retrieval
-collapses after turn 4 because raw history-text concatenation drowns out
-the user's *current* preference. A learned summarizer recovers it.
+    # 2. train (GPU; ~45-90 min on A100, depending on model size)
+    python src/train_state_extractor.py \
+        --train_jsonl data/state_extractor_train.jsonl \
+        --model_id Qwen/Qwen3-0.6B \
+        --output_dir out/state_extractor_qwen3_0.6b
 
-Run on a single A100/H100 (or 2x4090). Target: 1 epoch, ~30-90 min.
-This file is a *skeleton* — adapt to your training stack.
+The trainer uses LoRA (r=16, alpha=32) by default — a single A100/24GB card
+fits Qwen3-0.6B at batch=16, Qwen3-4B at batch=4. For multi-GPU just run
+with `accelerate launch` instead of `python`.
+
+CPU mode also works (for smoke tests / Colab T4) — it will be slow.
 """
 
 from __future__ import annotations
@@ -17,62 +22,181 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import random
-from typing import List
+import sys
+from typing import Any
 
-# These imports are GPU-only; install requirements-gpu.txt
-# from datasets import load_dataset
-# from transformers import (AutoTokenizer, AutoModelForCausalLM,
-#                           TrainingArguments, Trainer, DataCollatorForLanguageModeling)
-# from peft import LoraConfig, get_peft_model, TaskType
-
-
-SYSTEM = """You are a music preference extractor. Given a conversation history and the
-user's current message, output a JSON object describing what the user wants RIGHT NOW:
-{
-  "genre": "<comma-separated>", "mood": "<comma-separated>",
-  "era": "<decade or year range>", "energy": "low|medium|high",
-  "accepted_tags": ["..."], "rejected_tags": ["..."]
-}
-Use only what's grounded in the conversation; use empty strings if unknown."""
-
-
-def make_prompt(history: List[dict], user_query: str) -> str:
-    lines = []
-    for c in history:
-        if c["role"] == "music":
-            continue
-        lines.append(f"{c['role']}: {c['content']}")
-    return f"<system>\n{SYSTEM}\n</system>\n<history>\n" + "\n".join(lines) + f"\n</history>\n<user>\n{user_query}\n</user>\n<extracted_state>\n"
-
-
-def build_training_examples():
-    """Build pseudo-labels from the train split.
-
-    Heuristic labeling (since we don't have gold labels):
-      - The session-level `conversation_goal.listener_goal` is a free-text
-        intent — use as soft target.
-      - Tags from accepted tracks become `accepted_tags`.
-      - Tags from rejected tracks (turns where user pushes back) become
-        `rejected_tags`.
-    Replace this with a 7B-distilled labeler if you have credit for that.
-    """
-    raise NotImplementedError("Hook this up to your data-prep pipeline.")
+# These imports are heavy and only needed for training. We import lazily so
+# this file can still be parsed without torch installed.
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model_id", default="Qwen/Qwen3-0.6B")
-    parser.add_argument("--output_dir", default="./out/state_extractor")
-    parser.add_argument("--epochs", type=float, default=1.0)
-    parser.add_argument("--lr", type=float, default=2e-4)
-    parser.add_argument("--max_seq_len", type=int, default=2048)
-    parser.add_argument("--lora", action="store_true", default=True)
-    parser.add_argument("--no_lora", dest="lora", action="store_false")
-    args = parser.parse_args()
-    print(args)
-    print("This is a skeleton — implement build_training_examples and your training loop.")
-    print("Recommended: HuggingFace Trainer + LoRA (r=16, alpha=32) on A100; ~45 min/epoch.")
+    p = argparse.ArgumentParser()
+    p.add_argument("--train_jsonl", required=True)
+    p.add_argument("--eval_jsonl", default=None,
+                   help="Optional held-out JSONL (use data_prep.py with --max_sessions on test split)")
+    p.add_argument("--model_id", default="Qwen/Qwen3-0.6B",
+                   help="HF model id; tested with Qwen/Qwen3-0.6B and Qwen/Qwen3-4B")
+    p.add_argument("--output_dir", default="out/state_extractor")
+    p.add_argument("--epochs", type=float, default=1.0)
+    p.add_argument("--lr", type=float, default=2e-4)
+    p.add_argument("--batch_size", type=int, default=8,
+                   help="Per-device train batch size; lower for larger models")
+    p.add_argument("--grad_accum", type=int, default=2)
+    p.add_argument("--max_seq_len", type=int, default=2048)
+    p.add_argument("--lora_r", type=int, default=16)
+    p.add_argument("--lora_alpha", type=int, default=32)
+    p.add_argument("--lora_dropout", type=float, default=0.05)
+    p.add_argument("--no_lora", action="store_true",
+                   help="Full fine-tune (needs much more VRAM)")
+    p.add_argument("--bf16", action="store_true", default=True)
+    p.add_argument("--no_bf16", dest="bf16", action="store_false")
+    p.add_argument("--fp16", action="store_true",
+                   help="Use fp16 instead of bf16 (older GPUs)")
+    p.add_argument("--save_steps", type=int, default=200)
+    p.add_argument("--logging_steps", type=int, default=20)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--max_examples", type=int, default=None,
+                   help="Truncate training data — useful for quick smoke tests")
+    args = p.parse_args()
+
+    # Lazy imports so `--help` works without torch installed
+    try:
+        import torch
+        from datasets import Dataset
+        from transformers import (AutoTokenizer, AutoModelForCausalLM,
+                                  TrainingArguments, Trainer,
+                                  DataCollatorForLanguageModeling)
+    except ImportError as e:
+        print(f"ERROR: missing dependency: {e}\n"
+              "Install GPU deps: pip install -r requirements-gpu.txt", file=sys.stderr)
+        sys.exit(1)
+
+    use_lora = not args.no_lora
+    if use_lora:
+        try:
+            from peft import LoraConfig, get_peft_model, TaskType
+        except ImportError:
+            print("ERROR: peft not installed; pip install peft  (or pass --no_lora)",
+                  file=sys.stderr)
+            sys.exit(1)
+
+    print(f"Loading {args.model_id} ...")
+    tok = AutoTokenizer.from_pretrained(args.model_id, trust_remote_code=True)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+
+    dtype = torch.bfloat16 if args.bf16 and not args.fp16 else (
+        torch.float16 if args.fp16 else torch.float32
+    )
+    if not torch.cuda.is_available():
+        print("[warn] no CUDA visible — falling back to fp32 on CPU. "
+              "Training will be very slow.")
+        dtype = torch.float32
+
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model_id,
+        torch_dtype=dtype,
+        trust_remote_code=True,
+        device_map="auto" if torch.cuda.is_available() else None,
+    )
+    if use_lora:
+        cfg = LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            bias="none",
+            task_type=TaskType.CAUSAL_LM,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                            "gate_proj", "up_proj", "down_proj"],
+        )
+        model = get_peft_model(model, cfg)
+        model.print_trainable_parameters()
+
+    # Load JSONL into HF Dataset
+    def load_jsonl(path: str) -> Dataset:
+        data: list[dict[str, Any]] = []
+        with open(path) as f:
+            for line in f:
+                data.append(json.loads(line))
+        if args.max_examples:
+            data = data[: args.max_examples]
+        return Dataset.from_list(data)
+
+    print(f"Loading {args.train_jsonl} ...")
+    train_ds = load_jsonl(args.train_jsonl)
+    print(f"  train: {len(train_ds)}")
+    eval_ds = None
+    if args.eval_jsonl:
+        eval_ds = load_jsonl(args.eval_jsonl)
+        print(f"  eval:  {len(eval_ds)}")
+
+    # Tokenize messages -> tokens; mask user/system tokens out of the loss so
+    # the model only learns to *generate* the assistant's structured output.
+    def tokenize(example: dict) -> dict:
+        msgs = example["messages"]
+        text = tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=False)
+        out = tok(text, max_length=args.max_seq_len, truncation=True, padding=False)
+        # Build labels: copy input_ids, mask everything before the assistant turn
+        # by finding the assistant header in the rendered text
+        prompt_only = tok.apply_chat_template(
+            msgs[:-1], tokenize=False, add_generation_prompt=True,
+        )
+        prompt_tok = tok(prompt_only, truncation=True, max_length=args.max_seq_len)
+        n_prompt = len(prompt_tok["input_ids"])
+        labels = list(out["input_ids"])
+        for i in range(min(n_prompt, len(labels))):
+            labels[i] = -100
+        out["labels"] = labels
+        return out
+
+    cols_to_remove = train_ds.column_names
+    train_tok = train_ds.map(tokenize, remove_columns=cols_to_remove,
+                             desc="tokenize:train", num_proc=1)
+    eval_tok = None
+    if eval_ds is not None:
+        eval_tok = eval_ds.map(tokenize, remove_columns=eval_ds.column_names,
+                               desc="tokenize:eval", num_proc=1)
+
+    # Pad on the fly with the standard CausalLM collator (no MLM)
+    collator = DataCollatorForLanguageModeling(tok, mlm=False)
+
+    targs = TrainingArguments(
+        output_dir=args.output_dir,
+        per_device_train_batch_size=args.batch_size,
+        per_device_eval_batch_size=max(1, args.batch_size // 2),
+        gradient_accumulation_steps=args.grad_accum,
+        num_train_epochs=args.epochs,
+        learning_rate=args.lr,
+        warmup_ratio=0.03,
+        bf16=args.bf16 and not args.fp16,
+        fp16=args.fp16,
+        logging_steps=args.logging_steps,
+        save_steps=args.save_steps,
+        save_total_limit=2,
+        eval_strategy="steps" if eval_tok is not None else "no",
+        eval_steps=args.save_steps if eval_tok is not None else None,
+        report_to="none",
+        seed=args.seed,
+        gradient_checkpointing=True,
+        optim="adamw_torch",
+        remove_unused_columns=False,
+    )
+
+    trainer = Trainer(
+        model=model,
+        args=targs,
+        train_dataset=train_tok,
+        eval_dataset=eval_tok,
+        data_collator=collator,
+    )
+
+    print("Starting training ...")
+    trainer.train()
+
+    print(f"Saving final model to {args.output_dir} ...")
+    trainer.save_model(args.output_dir)
+    tok.save_pretrained(args.output_dir)
+    print("Done.")
 
 
 if __name__ == "__main__":
