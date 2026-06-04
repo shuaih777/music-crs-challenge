@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from typing import Any, Dict, List
 
@@ -65,27 +66,58 @@ def build_user_block(conversations: list, turn: int, tracks_by_id: Dict[str, dic
 def safe_parse_json(s: str) -> Dict[str, Any]:
     """Try to parse the assistant output as JSON; fall back to a permissive
     extractor that grabs the first balanced { ... } block.
+
+    Robust to:
+      - leading/trailing whitespace
+      - <think>...</think> blocks before the JSON (Qwen3 reasoning mode)
+      - text after the JSON block ("Here's the answer: {...} Let me explain...")
+      - braces inside string literals (handled by full json.loads on the slice)
     """
-    s = s.strip()
+    s = (s or "").strip()
+    if not s:
+        return {}
+
+    # Strip <think>...</think> block(s) at the start
+    while True:
+        m = re.match(r"^\s*<think>.*?</think>\s*", s, flags=re.DOTALL)
+        if not m:
+            break
+        s = s[m.end():]
+
+    # Try direct parse
     try:
         return json.loads(s)
     except Exception:
         pass
-    # find first { ... } block
+
+    # Find first balanced { ... } block, respecting strings + escapes.
     start = s.find("{")
     if start < 0:
         return {}
     depth = 0
+    in_str = False
+    escape = False
     for i in range(start, len(s)):
-        if s[i] == "{":
-            depth += 1
-        elif s[i] == "}":
-            depth -= 1
-            if depth == 0:
-                try:
-                    return json.loads(s[start:i + 1])
-                except Exception:
-                    return {}
+        ch = s[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(s[start:i + 1])
+                    except Exception:
+                        return {}
     return {}
 
 
@@ -98,7 +130,9 @@ def main() -> None:
                    help="If --model_dir is a LoRA adapter, fall back to this base model id")
     p.add_argument("--split", default="test", choices=["test", "Blind-A", "Blind-B"])
     p.add_argument("--out", required=True)
-    p.add_argument("--max_new_tokens", type=int, default=400)
+    p.add_argument("--max_new_tokens", type=int, default=512,
+                   help="Generation budget per turn. With enable_thinking=False "
+                        "the JSON target is rarely > 200 tokens; keeping headroom.")
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--max_sessions", type=int, default=None)
     args = p.parse_args()
@@ -123,7 +157,8 @@ def main() -> None:
             print("ERROR: cannot determine base model; pass --base_model", file=sys.stderr)
             sys.exit(1)
         print(f"Loading base {base_id} + LoRA adapter from {args.model_dir} ...")
-        tok = AutoTokenizer.from_pretrained(base_id, trust_remote_code=True)
+        tok = AutoTokenizer.from_pretrained(base_id, trust_remote_code=True,
+                                            padding_side="left")
         if tok.pad_token is None:
             tok.pad_token = tok.eos_token
         base = AutoModelForCausalLM.from_pretrained(
@@ -134,7 +169,8 @@ def main() -> None:
         model = PeftModel.from_pretrained(base, args.model_dir)
     else:
         print(f"Loading model from {args.model_dir} ...")
-        tok = AutoTokenizer.from_pretrained(args.model_dir, trust_remote_code=True)
+        tok = AutoTokenizer.from_pretrained(args.model_dir, trust_remote_code=True,
+                                            padding_side="left")
         if tok.pad_token is None:
             tok.pad_token = tok.eos_token
         model = AutoModelForCausalLM.from_pretrained(
@@ -158,6 +194,21 @@ def main() -> None:
     print(f"Sessions: {len(convo)}, tracks: {len(tracks_by_id)}")
 
     # Build prompts
+    # IMPORTANT: Qwen3 enables <think> reasoning by default which causes the
+    # model to spend its budget on free-form reasoning instead of producing
+    # the JSON object. enable_thinking=False forces direct emission.
+    def render(messages):
+        try:
+            return tok.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True,
+                enable_thinking=False,
+            )
+        except TypeError:
+            # Older / non-Qwen tokenizers don't accept enable_thinking
+            return tok.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True,
+            )
+
     prompts: List[dict] = []
     for ex in convo:
         for tn in range(1, 9):
@@ -166,7 +217,7 @@ def main() -> None:
                 {"role": "system", "content": SYSTEM_PROMPT_FALLBACK},
                 {"role": "user", "content": user_block},
             ]
-            prompt = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            prompt = render(messages)
             prompts.append({
                 "session_id": ex["session_id"],
                 "turn_number": tn,
@@ -189,9 +240,11 @@ def main() -> None:
                     pad_token_id=tok.pad_token_id,
                     eos_token_id=tok.eos_token_id,
                 )
+            # With padding_side='left', every row's generated tokens start at
+            # the same column = the padded prompt length.
+            prompt_len = inputs["input_ids"].shape[1]
             for j, b in enumerate(batch):
-                in_len = inputs["input_ids"][j].shape[0]
-                gen = out_ids[j][in_len:]
+                gen = out_ids[j][prompt_len:]
                 text = tok.decode(gen, skip_special_tokens=True)
                 state = safe_parse_json(text)
                 if state:

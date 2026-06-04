@@ -134,15 +134,26 @@ def main() -> None:
 
     # Tokenize messages -> tokens; mask user/system tokens out of the loss so
     # the model only learns to *generate* the assistant's structured output.
+    # IMPORTANT: render with enable_thinking=False to match inference; otherwise
+    # Qwen3 wastes its budget on free-form reasoning instead of the JSON.
+    def render_template(messages, add_gen):
+        try:
+            return tok.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=add_gen,
+                enable_thinking=False,
+            )
+        except TypeError:
+            return tok.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=add_gen,
+            )
+
     def tokenize(example: dict) -> dict:
         msgs = example["messages"]
-        text = tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=False)
+        text = render_template(msgs, add_gen=False)
         out = tok(text, max_length=args.max_seq_len, truncation=True, padding=False)
         # Build labels: copy input_ids, mask everything before the assistant turn
         # by finding the assistant header in the rendered text
-        prompt_only = tok.apply_chat_template(
-            msgs[:-1], tokenize=False, add_generation_prompt=True,
-        )
+        prompt_only = render_template(msgs[:-1], add_gen=True)
         prompt_tok = tok(prompt_only, truncation=True, max_length=args.max_seq_len)
         n_prompt = len(prompt_tok["input_ids"])
         labels = list(out["input_ids"])
