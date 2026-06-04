@@ -1,0 +1,35 @@
+Total lines: 8000
+
+category              count    pct
+ok                     4725  59.1%
+no_brace               3160  39.5%
+truncated               106   1.3%
+bad_json                  9   0.1%
+
+raw text length percentiles:
+  p10: 239
+  p25: 345
+  p50: 496
+  p75: 1683
+  p90: 1912
+  p99: 2243
+
+Samples per category:
+
+--- truncated (2 sample(s)) ---
+  5af68b4b-99de-4b43-a40a-15070a96e5fa/7  raw_len=1456
+    last 200 chars: 'mes are:\n\nNirvana, Method Man, Mary J. Blige, OutKast\n\nNow, the assistant needs to output the correct JSON object with the tags and artist names.\n\nSo the final output should be:\n\n{"genre": ["Hip-Hop/R'
+  db387c2c-9f0a-41e9-a6d0-694f84dbc7d6/2  raw_len=844
+    last 200 chars: '推荐，并在后续的对话中继续处理其他可能的音乐推荐。\n\n所以，最终的JSON对象应该是：\n\n{"genre": ["Hip-Hop/Rap"], "mood": [], "era": "2010s", "energy": "medium", "accepted_tags": ["Hip-Hop/Rap"], "rejected_tags": [], "artist_hints": ["Jinsang'
+
+--- bad_json (2 sample(s)) ---
+  c863175a-bbaf-4f6c-aef7-cb16f2792cb5/8  raw_len=425
+    first chars:    '<think>\n\n</think>\n\n{"genre": ["Hip-Hop/Rap", "hip-hop", "rap"], "mood": [], "era": "2010s", "energy": "medium", "accepted_tags": ["2003", "son of yvonne", "east coast rap", "masta ace", "hip hop tag",'
+  e13b10ab-260a-4c44-8179-e3161f71f3f2/8  raw_len=450
+    first chars:    '<think>\n\n</think>\n\n{"genre": ["alternative rock", "rockpop", "rockin", "Alternative", "indie hits"], "mood": ["epic", "chillout", "chill", "happy"], "era": "1990s", "energy": "low", "accepted_tags": ['
+
+--- no_brace (2 sample(s)) ---
+  ba3da7b0-1e81-4d2a-90fa-65ee1f4d7348/2  raw_len=1880
+    first chars:    ':supa: Alright, the user initially thought Nirvana was the answer to their question but they were wrong. The actual Nirv'
+  ba3da7b0-1e81-4d2a-90fa-65ee1f4d7348/3  raw_len=2070
+    first chars:    'ian: Alright, so the user is asking for a recommendation that the assistant has made. The assistant has tried to recomme'
