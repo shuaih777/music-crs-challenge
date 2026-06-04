@@ -288,6 +288,39 @@ def topk_indices(scores: np.ndarray, k: int) -> np.ndarray:
     return idx[np.argsort(-scores[idx])]
 
 
+def load_states_jsonl(path: str | None) -> dict[tuple[str, int], dict]:
+    """Load optional state-extractor outputs keyed by (session_id, turn)."""
+    if not path:
+        return {}
+    states: dict[tuple[str, int], dict] = {}
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            row = json.loads(line)
+            state = row.get("state") or {}
+            if state:
+                states[(row["session_id"], int(row["turn_number"]))] = state
+    print(f"Loaded {len(states)} non-empty states from {path}", flush=True)
+    return states
+
+
+def state_to_query_text(state: dict, user_query: str) -> str:
+    """Flatten a structured conversation state into a BM25-friendly query."""
+    parts: list[str] = []
+    for key in ("genre", "mood", "accepted_tags", "rejected_tags", "artist_hints"):
+        vals = state.get(key) or []
+        if isinstance(vals, list):
+            parts.extend(str(v) for v in vals if v)
+        elif vals:
+            parts.append(str(vals))
+    for key in ("era", "energy"):
+        val = state.get(key)
+        if val:
+            parts.append(str(val))
+    if user_query:
+        parts.append(user_query)
+    return " ".join(parts)
+
+
 # ----------------------------------------------------------------------------
 # Inference
 # ----------------------------------------------------------------------------
@@ -295,6 +328,8 @@ def topk_indices(scores: np.ndarray, k: int) -> np.ndarray:
 
 def run(args: argparse.Namespace) -> None:
     device = get_device(prefer=args.device, verbose=True)
+    states_by_turn = load_states_jsonl(args.states_jsonl)
+    n_state_used = 0
 
     print("Loading conversation dataset...", flush=True)
     convo = load_dataset("talkpl-ai/TalkPlayData-Challenge-Dataset")
@@ -355,6 +390,10 @@ def run(args: argparse.Namespace) -> None:
                 else:
                     hist_lines.append(f"{role}: {content}")
             full_query = ("\n".join(hist_lines) + "\n" + user_query).strip()
+            state = states_by_turn.get((session_id, tn))
+            if state:
+                full_query = state_to_query_text(state, user_query)
+                n_state_used += 1
             qt = tokenize(full_query)
 
             bm25_scores = bm25.score_query(qt)
@@ -425,6 +464,8 @@ def run(args: argparse.Namespace) -> None:
     pbar.close()
 
     print(f"  dense used in {n_dense_used} of {total} calls", flush=True)
+    if args.states_jsonl:
+        print(f"  state query used in {n_state_used} of {total} calls", flush=True)
     print(f"  no-repeat filter removed {n_filtered} candidates", flush=True)
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
@@ -457,6 +498,9 @@ def parse_args() -> argparse.Namespace:
                    choices=["constant", "ascending", "descending", "zero_after"])
     p.add_argument("--dense_max_turn", type=int, default=4)
     p.add_argument("--topk_fuse", type=int, default=200)
+    p.add_argument("--states_jsonl", default=None,
+                   help="Optional extractor output JSONL. If present, non-empty "
+                        "states replace raw history text in the BM25 query.")
     # auto-pass: argparse converts 'auto' on argparse 1.x; pass through
     args = p.parse_args()
     if args.device == "auto":

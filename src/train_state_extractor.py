@@ -110,6 +110,8 @@ def main() -> None:
                             "gate_proj", "up_proj", "down_proj"],
         )
         model = get_peft_model(model, cfg)
+        if hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
         model.print_trainable_parameters()
 
     # Load JSONL into HF Dataset
@@ -157,8 +159,22 @@ def main() -> None:
         eval_tok = eval_ds.map(tokenize, remove_columns=eval_ds.column_names,
                                desc="tokenize:eval", num_proc=1)
 
-    # Pad on the fly with the standard CausalLM collator (no MLM)
-    collator = DataCollatorForLanguageModeling(tok, mlm=False)
+    def collator(features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
+        labels = [f["labels"] for f in features]
+        inputs = [{k: v for k, v in f.items() if k != "labels"} for f in features]
+        batch = tok.pad(inputs, padding=True, return_tensors="pt")
+
+        max_len = batch["input_ids"].shape[1]
+        padded_labels = []
+        for lab in labels:
+            pad_len = max_len - len(lab)
+            if tok.padding_side == "left":
+                padded = [-100] * pad_len + lab
+            else:
+                padded = lab + [-100] * pad_len
+            padded_labels.append(padded)
+        batch["labels"] = torch.tensor(padded_labels, dtype=torch.long)
+        return batch
 
     targs = TrainingArguments(
         output_dir=args.output_dir,

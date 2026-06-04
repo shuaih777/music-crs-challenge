@@ -22,6 +22,8 @@ cache/
 
 # Large generated / transient artifacts
 exp/inference/devset/*.json.tmp
+data/*.jsonl
+out/
 
 # Don't ship the upstream nlp4musa clones — see README for clone instructions
 music-crs-baselines/
