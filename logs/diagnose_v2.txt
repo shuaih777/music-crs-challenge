@@ -1,0 +1,28 @@
+Total lines: 8000
+
+category              count    pct
+ok                     7995  99.9%
+bad_json                  3   0.0%
+truncated                 2   0.0%
+
+raw text length percentiles:
+  p10: 203
+  p25: 262
+  p50: 342
+  p75: 408
+  p90: 454
+  p99: 526
+
+Samples per category:
+
+--- truncated (2 sample(s)) ---
+  54182ace-7209-4439-bee3-d917fce2499c/5  raw_len=1115
+    last 200 chars: ' - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -'
+  54182ace-7209-4439-bee3-d917fce2499c/6  raw_len=1115
+    last 200 chars: ' - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -'
+
+--- bad_json (2 sample(s)) ---
+  36e46d6a-61b6-4aea-8ef1-e44a26250912/8  raw_len=439
+    first chars:    '{"genre": ["jazz piano", "jazz piano jazz", "jazz piano jazz", "jazz piano jazz", "jazz piano jazz"], "mood": ["chillout", "chill"], "era": "1960s", "energy": "low", "accepted_tags": ["blues", "bebop"'
+  8641a4a5-24fb-4424-8341-063542f06dc5/5  raw_len=338
+    first chars:    '{"genre": ["Latin Pop", "Latin"], "mood": [], "era": "2010s", "energy": "medium", "accepted_tags": ["blues", "rock \'n roll", "rock\', "classic rock", "Jet", "heavy blues", "experimental", "loved"], "re'
