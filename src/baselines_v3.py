@@ -303,7 +303,69 @@ def load_states_jsonl(path: str | None) -> dict[tuple[str, int], dict]:
     return states
 
 
+# ----------------------------------------------------------------------------
+# State -> query construction
+#
+# Rejected_tags are NOT positive query terms — they are exactly what the user
+# does NOT want. The previous implementation of state_to_query_text concatenated
+# rejected_tags with positive fields, which polluted the BM25 query and is why
+# bm25_norepeat_states barely beat bm25_norepeat (0.1023 vs 0.0998).
+#
+# The new functions split state into:
+#   - positive_query_text: weighted multi-occurrence string for BM25 / dense
+#   - negative_query_tokens: a token set used to subtract from BM25 scores
+# The caller decides whether to use only positive (--state_subtract_rejected=0)
+# or both.
+# ----------------------------------------------------------------------------
+
+
+def _flatten_state_field(v) -> list[str]:
+    if v is None:
+        return []
+    if isinstance(v, list):
+        return [str(x) for x in v if x]
+    if isinstance(v, str):
+        return [v] if v.strip() else []
+    return [str(v)]
+
+
+def state_positive_text(state: dict, user_query: str = "",
+                        weights: dict[str, int] | None = None) -> str:
+    """Build a BM25/dense-friendly positive-only query text from a state.
+
+    `weights` maps field-name -> integer repetition count to bias BM25 scoring
+    (and to densify the dense-encode input). Default tuning: artist_hints (3) >
+    genre (3) > accepted_tags (2) ~ mood (2) ~ user_query (2) > era (1) > energy (1).
+    """
+    weights = weights or {
+        "genre": 3, "artist_hints": 3,
+        "accepted_tags": 2, "mood": 2,
+        "era": 1, "energy": 1,
+        "user_query": 2,
+    }
+    parts: list[str] = []
+    for field in ("genre", "mood", "era", "energy", "accepted_tags", "artist_hints"):
+        vals = _flatten_state_field(state.get(field))
+        if not vals:
+            continue
+        joined = " ".join(vals)
+        parts.extend([joined] * weights.get(field, 1))
+    if user_query:
+        parts.extend([user_query] * weights.get("user_query", 1))
+    return "\n".join(parts)
+
+
+def state_negative_tokens(state: dict) -> list[str]:
+    """Tokens to *subtract* from BM25 scores (i.e. rejected tags / artists)."""
+    rej = _flatten_state_field(state.get("rejected_tags"))
+    return tokenize(" ".join(rej))
+
+
+# Backwards-compatible alias (older code calls this name)
 def state_to_query_text(state: dict, user_query: str) -> str:
+    """Deprecated: positive-only flatten. Use state_positive_text instead."""
+    return state_positive_text(state, user_query)
+
     """Flatten a structured conversation state into a BM25-friendly query."""
     parts: list[str] = []
     for key in ("genre", "mood", "accepted_tags", "rejected_tags", "artist_hints"):
@@ -322,6 +384,50 @@ def state_to_query_text(state: dict, user_query: str) -> str:
 
 
 # ----------------------------------------------------------------------------
+# State-text dense encodings
+# ----------------------------------------------------------------------------
+
+
+def load_state_embeddings(path: str | None,
+                          states_by_turn: dict[tuple[str, int], dict] | None = None,
+                          ) -> dict[tuple[str, int], np.ndarray] | None:
+    """Load a pre-computed (session_id, turn) -> dense vector mapping.
+
+    Two storage formats accepted:
+      1. NPZ with arrays: keys (uint8 bytes joined "|"), embeddings (N, D)
+         shape (Float32). Created by encode_states.py.
+      2. NPY of shape (8000, D) plus a side-by-side .meta.jsonl listing
+         {"session_id":..., "turn_number":...} in row order.
+
+    Returns None if path is None.
+    """
+    if not path:
+        return None
+    if path.endswith(".npz"):
+        bundle = np.load(path, allow_pickle=False)
+        keys = bundle["keys"]  # shape (N,) of bytes
+        embs = bundle["embeddings"]  # (N, D)
+        out: dict[tuple[str, int], np.ndarray] = {}
+        for k, e in zip(keys, embs):
+            session_id, tn_str = k.decode("utf-8").rsplit("|", 1)
+            out[(session_id, int(tn_str))] = e.astype(np.float32, copy=False)
+        return out
+    if path.endswith(".npy"):
+        meta_path = path[:-4] + ".meta.jsonl"
+        if not os.path.exists(meta_path):
+            raise FileNotFoundError(
+                f"Expected metadata at {meta_path} alongside {path}")
+        embs = np.load(path)
+        out = {}
+        with open(meta_path) as f:
+            for i, line in enumerate(f):
+                m = json.loads(line)
+                out[(m["session_id"], int(m["turn_number"]))] = embs[i].astype(np.float32, copy=False)
+        return out
+    raise ValueError(f"Unsupported state-emb path extension: {path}")
+
+
+# ----------------------------------------------------------------------------
 # Inference
 # ----------------------------------------------------------------------------
 
@@ -329,7 +435,12 @@ def state_to_query_text(state: dict, user_query: str) -> str:
 def run(args: argparse.Namespace) -> None:
     device = get_device(prefer=args.device, verbose=True)
     states_by_turn = load_states_jsonl(args.states_jsonl)
+    state_emb_by_turn = load_state_embeddings(args.state_emb_path, states_by_turn)
+    if state_emb_by_turn is not None:
+        print(f"Loaded {len(state_emb_by_turn)} state embeddings from {args.state_emb_path}",
+              flush=True)
     n_state_used = 0
+    n_neg_used = 0
 
     print("Loading conversation dataset...", flush=True)
     convo = load_dataset("talkpl-ai/TalkPlayData-Challenge-Dataset")
@@ -389,25 +500,59 @@ def run(args: argparse.Namespace) -> None:
                     hist_lines.append(f"system: recommended {name_s} by {artist_s}")
                 else:
                     hist_lines.append(f"{role}: {content}")
-            full_query = ("\n".join(hist_lines) + "\n" + user_query).strip()
+            history_query = ("\n".join(hist_lines) + "\n" + user_query).strip()
+
+            # ---- Build the BM25 query text -------------------------------
+            # Modes:
+            #   history       : raw history concat (default, baseline behaviour)
+            #   state         : weighted state text + user_query (positive only)
+            #   state_only    : same as state but skip user_query duplication
             state = states_by_turn.get((session_id, tn))
-            if state:
-                full_query = state_to_query_text(state, user_query)
+            neg_tokens: list[str] = []
+            if args.query_mode in ("state", "state_only") and state:
+                full_query = state_positive_text(
+                    state,
+                    user_query="" if args.query_mode == "state_only" else user_query,
+                )
+                if args.state_subtract_rejected:
+                    neg_tokens = state_negative_tokens(state)
                 n_state_used += 1
+            else:
+                full_query = history_query
             qt = tokenize(full_query)
 
             bm25_scores = bm25.score_query(qt)
+            if neg_tokens:
+                neg_scores = bm25.score_query(neg_tokens)
+                bm25_scores = bm25_scores - args.neg_weight * neg_scores
+                n_neg_used += 1
             bm25_rank = topk_indices(bm25_scores, args.topk_fuse)
 
             ranked: np.ndarray
             if track_emb_np is not None:
-                prior_idx = [track_idx_by_id[t] for t in prior_track_ids if t in track_idx_by_id]
-                q_vec = pool_prior_embeddings(prior_idx, track_emb_np,
-                                              mode=args.pooling,
-                                              decay_alpha=args.decay_alpha,
-                                              last_k=args.last_k)
+                # ---- Build dense query ----------------------------------
+                # Priority: pre-computed state embedding (cheapest) > pool of
+                # prior accepted tracks (original behaviour).
+                q_vec: np.ndarray | None = None
+                if state_emb_by_turn is not None:
+                    q_vec = state_emb_by_turn.get((session_id, tn))
+                    if q_vec is not None:
+                        # Dimension-mismatched? Fall back to prior pooling.
+                        if q_vec.shape[0] != track_emb_np.shape[1]:
+                            q_vec = None
+                if q_vec is None:
+                    prior_idx = [track_idx_by_id[t] for t in prior_track_ids
+                                 if t in track_idx_by_id]
+                    q_vec = pool_prior_embeddings(prior_idx, track_emb_np,
+                                                  mode=args.pooling,
+                                                  decay_alpha=args.decay_alpha,
+                                                  last_k=args.last_k)
                 if q_vec is not None:
                     n_dense_used += 1
+                    # L2-norm just to be safe
+                    qn = float(np.linalg.norm(q_vec))
+                    if qn > 1e-9:
+                        q_vec = q_vec / qn
                     if track_emb_t is not None:
                         import torch
                         q_t = torch.as_tensor(q_vec, device=device)
@@ -465,7 +610,13 @@ def run(args: argparse.Namespace) -> None:
 
     print(f"  dense used in {n_dense_used} of {total} calls", flush=True)
     if args.states_jsonl:
-        print(f"  state query used in {n_state_used} of {total} calls", flush=True)
+        print(f"  state query used in {n_state_used} of {total} calls "
+              f"(mode={args.query_mode})", flush=True)
+        if args.state_subtract_rejected:
+            print(f"  rejected-tag negative scoring applied {n_neg_used} times "
+                  f"(weight={args.neg_weight})", flush=True)
+    if args.state_emb_path:
+        print(f"  state-emb dense queries: {args.state_emb_path}", flush=True)
     print(f"  no-repeat filter removed {n_filtered} candidates", flush=True)
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
@@ -499,8 +650,26 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dense_max_turn", type=int, default=4)
     p.add_argument("--topk_fuse", type=int, default=200)
     p.add_argument("--states_jsonl", default=None,
-                   help="Optional extractor output JSONL. If present, non-empty "
-                        "states replace raw history text in the BM25 query.")
+                   help="Optional extractor output JSONL. Combined with "
+                        "--query_mode and --state_subtract_rejected.")
+    p.add_argument("--query_mode", default="history",
+                   choices=["history", "state", "state_only"],
+                   help="Source of the BM25/sparse query text. "
+                        "'history' = raw transcript concat (legacy). "
+                        "'state' = weighted state attrs + current user_query. "
+                        "'state_only' = state attrs without user_query "
+                        "(use when state already encodes the user's intent).")
+    p.add_argument("--state_subtract_rejected", action="store_true",
+                   help="Treat state.rejected_tags as negative BM25 evidence: "
+                        "subtract neg_weight * BM25(rejected_tags) from scores.")
+    p.add_argument("--neg_weight", type=float, default=0.5,
+                   help="Strength of the rejected-tags negative penalty.")
+    p.add_argument("--state_emb_path", default=None,
+                   help="Optional path to a precomputed (session, turn) -> "
+                        "dense embedding map (.npz or .npy with .meta.jsonl). "
+                        "When given AND --embed picks a matching-dim modality, "
+                        "this overrides the prior-pool dense-query construction. "
+                        "Build via src/encode_states.py.")
     # auto-pass: argparse converts 'auto' on argparse 1.x; pass through
     args = p.parse_args()
     if args.device == "auto":
