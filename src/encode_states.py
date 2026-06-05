@@ -57,6 +57,37 @@ def build_state_text(state: dict) -> str:
     return state_positive_text(state, user_query="")
 
 
+# Qwen3-Embedding retrieval instruction templates. The HF model card's
+# canonical retrieval format is: "Instruct: <task>\nQuery: <query>". Track-side
+# embeddings may have used different (or empty) instructions during their
+# pre-computation -- we don't have the dataset card -- so try a few.
+INSTRUCTION_TEMPLATES = {
+    "none":
+        "{query}",
+    "qwen3_default":
+        "Instruct: Given a music preference description, retrieve relevant tracks.\n"
+        "Query: {query}",
+    "qwen3_music":
+        "Instruct: Given a description of musical taste (genre, mood, era, "
+        "energy, accepted tags, artists), retrieve a music track that matches.\n"
+        "Query: {query}",
+    "qwen3_attributes":
+        "Instruct: Given a description of music attributes, retrieve tracks "
+        "with similar attributes.\n"
+        "Query: {query}",
+    "qwen3_metadata":
+        "Instruct: Given a music preference profile, retrieve tracks whose "
+        "metadata matches the profile.\n"
+        "Query: {query}",
+}
+
+
+def apply_instruction(text: str, mode: str, custom: str = "") -> str:
+    if mode == "custom":
+        return f"{custom}\nQuery: {text}" if custom else text
+    return INSTRUCTION_TEMPLATES[mode].format(query=text)
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--states_jsonl", required=True,
@@ -78,6 +109,16 @@ def main() -> None:
                    help="Append the current user_query to each state text. "
                         "Off by default to keep the embedding focused on the "
                         "extracted state attributes.")
+    p.add_argument("--instruction", default="qwen3_default",
+                   choices=["none", "qwen3_default", "qwen3_music",
+                            "qwen3_attributes", "qwen3_metadata", "custom"],
+                   help="Instruction prefix for Qwen3-Embedding-style models. "
+                        "Qwen3-Embedding requires retrieval task instructions; "
+                        "without them, query and document vectors land in "
+                        "different subspaces. Try a few prefixes and pick by "
+                        "downstream nDCG@20.")
+    p.add_argument("--custom_instruction", default="",
+                   help="Used when --instruction=custom.")
     p.add_argument("--max_examples", type=int, default=None,
                    help="Smoke-test cap; if set, only encode the first N states.")
     args = p.parse_args()
@@ -116,6 +157,7 @@ def main() -> None:
     print(f"  states with non-empty parse: {len(rows)}", flush=True)
 
     # Build texts
+    print(f"  applying instruction template: {args.instruction}", flush=True)
     texts: List[str] = []
     for r in rows:
         t = build_state_text(r["state"])
@@ -123,7 +165,12 @@ def main() -> None:
             # raw contains the full extractor output incl. the user_query echo
             # We'd ideally pass user_query separately; settle for state alone
             pass
-        texts.append(t or " ")  # avoid empty strings (encoder hates them)
+        if not t:
+            t = " "
+        t = apply_instruction(t, args.instruction, args.custom_instruction)
+        texts.append(t)
+    if texts:
+        print(f"  example formatted query: {texts[0][:200]}", flush=True)
 
     # Load encoder
     print("  loading encoder...", flush=True)
