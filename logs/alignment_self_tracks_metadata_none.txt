@@ -1,0 +1,22 @@
+[align] state_emb=exp/states/test_qwen3_emb_qwen3_music.npz
+[align] state vectors: (7995, 1024), norm[0]=1.0000
+[align] loading ground truth from exp/ground_truth/devset.json
+[align] loading custom track embeddings exp/tracks/qwen3_tracks_metadata_none.npz
+[align] 47071 tracks; raw norm[0]=1.0000
+
+[align] scored 1000 pairs (skipped 0)
+[align] median rank: 747 / 47071
+[align] mean rank:   4738
+[align] hit rates:
+  Hit@1   :     9 / 1000 =   0.9%
+  Hit@10  :    94 / 1000 =   9.4%
+  Hit@20  :   143 / 1000 =  14.3%
+  Hit@100 :   277 / 1000 =  27.7%
+  Hit@500 :   431 / 1000 =  43.1%
+
+[align] random baseline hit rates (uniform):
+  Hit@1   :     0 / 1000 =   0.0%
+  Hit@10  :     1 / 1000 =   0.1%
+  Hit@20  :     1 / 1000 =   0.1%
+  Hit@100 :     5 / 1000 =   0.5%
+  Hit@500 :    17 / 1000 =   1.7%

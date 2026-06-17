@@ -233,6 +233,29 @@ def load_track_embeddings(field: str, track_ids: List[str]) -> np.ndarray:
     return out
 
 
+def load_track_embeddings_npz(path: str, track_ids: List[str]) -> np.ndarray:
+    print(f"Loading track embeddings from {path}...", flush=True)
+    bundle = np.load(path, allow_pickle=False)
+    keys = bundle["keys"]
+    embs = bundle["embeddings"].astype(np.float32, copy=False)
+    by_id = {k.decode("utf-8"): embs[i] for i, k in enumerate(keys)}
+    dim = int(embs.shape[1])
+    out = np.zeros((len(track_ids), dim), dtype=np.float32)
+    n_missing = 0
+    for i, tid in enumerate(track_ids):
+        e = by_id.get(tid)
+        if e is None:
+            n_missing += 1
+        else:
+            out[i] = e
+    if n_missing:
+        print(f"  WARNING: {n_missing} tracks missing from {path}; zero-padded", flush=True)
+    norms = np.linalg.norm(out, axis=1, keepdims=True)
+    out = out / np.clip(norms, 1e-9, None)
+    print(f"  embeddings: shape={out.shape}", flush=True)
+    return out
+
+
 def pool_prior_embeddings(prior_idx: List[int], track_emb: np.ndarray,
                           mode: str, decay_alpha: float = 0.7,
                           last_k: int = 3) -> np.ndarray | None:
@@ -464,7 +487,10 @@ def run(args: argparse.Namespace) -> None:
     track_emb_np: np.ndarray | None = None
     track_emb_t = None  # type: ignore
     if not args.bm25_only:
-        track_emb_np = load_track_embeddings(args.embed, track_ids)
+        if args.track_emb_path:
+            track_emb_np = load_track_embeddings_npz(args.track_emb_path, track_ids)
+        else:
+            track_emb_np = load_track_embeddings(args.embed, track_ids)
         if has_torch() and device != "cpu":
             import torch
             track_emb_t = torch.as_tensor(track_emb_np, device=device)
@@ -617,6 +643,8 @@ def run(args: argparse.Namespace) -> None:
                   f"(weight={args.neg_weight})", flush=True)
     if args.state_emb_path:
         print(f"  state-emb dense queries: {args.state_emb_path}", flush=True)
+    if args.track_emb_path:
+        print(f"  custom track embeddings: {args.track_emb_path}", flush=True)
     print(f"  no-repeat filter removed {n_filtered} candidates", flush=True)
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
@@ -670,6 +698,10 @@ def parse_args() -> argparse.Namespace:
                         "When given AND --embed picks a matching-dim modality, "
                         "this overrides the prior-pool dense-query construction. "
                         "Build via src/encode_states.py.")
+    p.add_argument("--track_emb_path", default=None,
+                   help="Optional path to custom track embeddings (.npz with "
+                        "keys=track_id bytes and embeddings). Overrides --embed "
+                        "for dense retrieval. Build via src/encode_tracks.py.")
     # auto-pass: argparse converts 'auto' on argparse 1.x; pass through
     args = p.parse_args()
     if args.device == "auto":

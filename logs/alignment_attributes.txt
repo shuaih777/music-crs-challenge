@@ -1,0 +1,115 @@
+=== none ===
+[align] state_emb=exp/states/test_qwen3_emb_none.npz
+[align] state vectors: (7995, 1024), norm[0]=1.0000
+[align] loading ground truth from exp/ground_truth/devset.json
+[align] loading track field attributes-qwen3_embedding_0.6b
+[align] 46579 tracks; raw norm[0]=85.6317
+
+[align] scored 1000 pairs (skipped 0)
+[align] median rank: 2347 / 46579
+[align] mean rank:   7151
+[align] hit rates:
+  Hit@1   :     3 / 1000 =   0.3%
+  Hit@10  :    26 / 1000 =   2.6%
+  Hit@20  :    38 / 1000 =   3.8%
+  Hit@100 :    97 / 1000 =   9.7%
+  Hit@500 :   265 / 1000 =  26.5%
+
+[align] random baseline hit rates (uniform):
+  Hit@1   :     0 / 1000 =   0.0%
+  Hit@10  :     1 / 1000 =   0.1%
+  Hit@20  :     1 / 1000 =   0.1%
+  Hit@100 :     5 / 1000 =   0.5%
+  Hit@500 :    17 / 1000 =   1.7%
+=== qwen3_default ===
+[align] state_emb=exp/states/test_qwen3_emb_qwen3_default.npz
+[align] state vectors: (7995, 1024), norm[0]=1.0000
+[align] loading ground truth from exp/ground_truth/devset.json
+[align] loading track field attributes-qwen3_embedding_0.6b
+[align] 46579 tracks; raw norm[0]=85.6317
+
+[align] scored 1000 pairs (skipped 0)
+[align] median rank: 2406 / 46579
+[align] mean rank:   6810
+[align] hit rates:
+  Hit@1   :     5 / 1000 =   0.5%
+  Hit@10  :    30 / 1000 =   3.0%
+  Hit@20  :    44 / 1000 =   4.4%
+  Hit@100 :   119 / 1000 =  11.9%
+  Hit@500 :   265 / 1000 =  26.5%
+
+[align] random baseline hit rates (uniform):
+  Hit@1   :     0 / 1000 =   0.0%
+  Hit@10  :     1 / 1000 =   0.1%
+  Hit@20  :     1 / 1000 =   0.1%
+  Hit@100 :     5 / 1000 =   0.5%
+  Hit@500 :    17 / 1000 =   1.7%
+=== qwen3_music ===
+[align] state_emb=exp/states/test_qwen3_emb_qwen3_music.npz
+[align] state vectors: (7995, 1024), norm[0]=1.0000
+[align] loading ground truth from exp/ground_truth/devset.json
+[align] loading track field attributes-qwen3_embedding_0.6b
+[align] 46579 tracks; raw norm[0]=85.6317
+
+[align] scored 1000 pairs (skipped 0)
+[align] median rank: 2331 / 46579
+[align] mean rank:   6659
+[align] hit rates:
+  Hit@1   :     4 / 1000 =   0.4%
+  Hit@10  :    28 / 1000 =   2.8%
+  Hit@20  :    42 / 1000 =   4.2%
+  Hit@100 :   121 / 1000 =  12.1%
+  Hit@500 :   282 / 1000 =  28.2%
+
+[align] random baseline hit rates (uniform):
+  Hit@1   :     0 / 1000 =   0.0%
+  Hit@10  :     1 / 1000 =   0.1%
+  Hit@20  :     1 / 1000 =   0.1%
+  Hit@100 :     5 / 1000 =   0.5%
+  Hit@500 :    17 / 1000 =   1.7%
+=== qwen3_attributes ===
+[align] state_emb=exp/states/test_qwen3_emb_qwen3_attributes.npz
+[align] state vectors: (7995, 1024), norm[0]=1.0000
+[align] loading ground truth from exp/ground_truth/devset.json
+[align] loading track field attributes-qwen3_embedding_0.6b
+[align] 46579 tracks; raw norm[0]=85.6317
+
+[align] scored 1000 pairs (skipped 0)
+[align] median rank: 2350 / 46579
+[align] mean rank:   7042
+[align] hit rates:
+  Hit@1   :     2 / 1000 =   0.2%
+  Hit@10  :    23 / 1000 =   2.3%
+  Hit@20  :    31 / 1000 =   3.1%
+  Hit@100 :    96 / 1000 =   9.6%
+  Hit@500 :   260 / 1000 =  26.0%
+
+[align] random baseline hit rates (uniform):
+  Hit@1   :     0 / 1000 =   0.0%
+  Hit@10  :     1 / 1000 =   0.1%
+  Hit@20  :     1 / 1000 =   0.1%
+  Hit@100 :     5 / 1000 =   0.5%
+  Hit@500 :    17 / 1000 =   1.7%
+=== qwen3_metadata ===
+[align] state_emb=exp/states/test_qwen3_emb_qwen3_metadata.npz
+[align] state vectors: (7995, 1024), norm[0]=1.0000
+[align] loading ground truth from exp/ground_truth/devset.json
+[align] loading track field attributes-qwen3_embedding_0.6b
+[align] 46579 tracks; raw norm[0]=85.6317
+
+[align] scored 1000 pairs (skipped 0)
+[align] median rank: 2561 / 46579
+[align] mean rank:   7094
+[align] hit rates:
+  Hit@1   :     3 / 1000 =   0.3%
+  Hit@10  :    30 / 1000 =   3.0%
+  Hit@20  :    40 / 1000 =   4.0%
+  Hit@100 :   121 / 1000 =  12.1%
+  Hit@500 :   264 / 1000 =  26.4%
+
+[align] random baseline hit rates (uniform):
+  Hit@1   :     0 / 1000 =   0.0%
+  Hit@10  :     1 / 1000 =   0.1%
+  Hit@20  :     1 / 1000 =   0.1%
+  Hit@100 :     5 / 1000 =   0.5%
+  Hit@500 :    17 / 1000 =   1.7%

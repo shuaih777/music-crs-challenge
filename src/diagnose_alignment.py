@@ -34,6 +34,9 @@ def main() -> None:
                             "attributes-qwen3_embedding_0.6b",
                             "lyrics-qwen3_embedding_0.6b",
                             "metadata-qwen3_embedding_0.6b"])
+    p.add_argument("--track_emb_path", default=None,
+                   help="Optional custom track embedding .npz from encode_tracks.py. "
+                        "When set, this overrides --track_field.")
     p.add_argument("--ground_truth", default="exp/ground_truth/devset.json")
     p.add_argument("--sample", type=int, default=1000,
                    help="Subsample of (session, turn) pairs to score against. "
@@ -65,17 +68,23 @@ def main() -> None:
         for g in gt
     }
 
-    print(f"[align] loading track field {args.track_field}", flush=True)
-    track_emb = load_dataset("talkpl-ai/TalkPlayData-Challenge-Track-Embeddings",
-                             split="all_tracks")
     track_ids: list[str] = []
-    vecs: list[list[float]] = []
-    for r in tqdm(track_emb, desc="indexing tracks"):
-        v = r[args.track_field]
-        if v and isinstance(v, list) and len(v) > 0:
-            track_ids.append(r["track_id"])
-            vecs.append(v)
-    T = np.asarray(vecs, dtype=np.float32)
+    if args.track_emb_path:
+        print(f"[align] loading custom track embeddings {args.track_emb_path}", flush=True)
+        tb = np.load(args.track_emb_path, allow_pickle=False)
+        track_ids = [k.decode("utf-8") for k in tb["keys"]]
+        T = tb["embeddings"].astype(np.float32, copy=False)
+    else:
+        print(f"[align] loading track field {args.track_field}", flush=True)
+        track_emb = load_dataset("talkpl-ai/TalkPlayData-Challenge-Track-Embeddings",
+                                 split="all_tracks")
+        vecs: list[list[float]] = []
+        for r in tqdm(track_emb, desc="indexing tracks"):
+            v = r[args.track_field]
+            if v and isinstance(v, list) and len(v) > 0:
+                track_ids.append(r["track_id"])
+                vecs.append(v)
+        T = np.asarray(vecs, dtype=np.float32)
     print(f"[align] {T.shape[0]} tracks; raw norm[0]={np.linalg.norm(T[0]):.4f}",
           flush=True)
     if args.center_track:
