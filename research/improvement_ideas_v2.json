@@ -1,0 +1,297 @@
+{
+  "ranked_ideas": [
+    {
+      "rank": 1,
+      "name": "LightGBM LambdaMART Meta-Ranker over Multi-Leg Union",
+      "innovation_angle": "Unlike naive RRF which assigns fixed reciprocal-rank weights, this trains a gradient-boosted ranker that directly optimizes nDCG@20 using per-candidate features from all 6 retrieval legs (BM25 rank, metadata_qwen3 cosine, cf_bpr score, CLAP similarity, state-BM25 score, popularity), plus conversation-level features (turn number, number of prior accepts/rejects, entity count). The paper-worthy contribution is demonstrating that learned fusion with turn-aware features outperforms static RRF in conversational settings where retrieval difficulty varies systematically across turns.",
+      "concrete_plan": "1. Generate top-100 candidate pool per turn from union of all existing retrieval legs (metadata_qwen3, cf_bpr, CLAP, BM25, state_bm25) — already have inference JSONs for these. 2. Build feature matrix: per-leg rank, per-leg score, track popularity, turn_number, num_prior_accepts, session_length, genre_match_with_state. Label = 1 if candidate is gold track, else 0. 3. Train LightGBM with objective=lambdarank, lambdarank_truncation_level=20, metric=ndcg, on devset with 5-fold grouped CV (group by session_id). 4. Score full candidate pools and emit top-20 per turn. 5. Expected: nDCG@20 0.14-0.16 (the union pool has ~35-40% Hit@100 vs 26% Hit@20, so reranking within this pool should recover missed hits).",
+      "effort": "1-2 days",
+      "gpu_requirement": "none",
+      "key_risk": "If the union-pool Hit@20 ceiling is not much higher than individual legs (i.e., the same tracks are missed by ALL legs), the reranker cannot help. Verify union Hit@100 first. Also risk of overfitting on 1000 devset sessions with CV.",
+      "expected_ndcg_lift": "+15-30% relative (0.124 -> 0.14-0.16)",
+      "source_urls": [
+        "https://lightgbm.readthedocs.io/en/latest/Parameters.html",
+        "https://www.recsyschallenge.com/2024/",
+        "https://www.recsyschallenge.com/2023/"
+      ]
+    },
+    {
+      "rank": 2,
+      "name": "Response Quality Boost: Nucleus Sampling + Presence Penalty + Grounded Templates",
+      "innovation_angle": "Exploits documented LLM-as-judge biases (verbosity, formatting, specificity) to maximize the Gemini evaluation score and Distinct-2 simultaneously. The key insight is that the current system uses templated responses (Distinct-2 = 0.10 vs target 0.25) — switching to Qwen3-0.6B generation with presence_penalty=1.5, top_p=0.8, temperature=0.7, grounded in retrieved track metadata (genre, mood, artist facts), addresses both metrics at once. Paper-worthy angle: systematic study of how decoding parameters and metadata grounding jointly optimize recommendation explanation quality under LLM-as-judge evaluation.",
+      "concrete_plan": "1. Design 5-8 diverse prompt templates that inject conversation state + retrieved track metadata into Qwen3-0.6B prompts (e.g., 'The user enjoys [genres] and wants [mood]. I recommend [track] by [artist] because [grounded reason]'). 2. Set generation params: temperature=0.7, top_p=0.8, top_k=20, presence_penalty=1.5, max_new_tokens=80. 3. For each turn, select template based on turn type (greeting/elicit/recommend/explain) to naturally vary vocabulary. 4. Add track-specific details from metadata (genre, year, mood tags) to ground explanations and avoid hallucination. 5. Evaluate Distinct-2 improvement and manually spot-check 50 responses for fluency.",
+      "effort": "1-2 days",
+      "gpu_requirement": "small (1x 24GB)",
+      "key_risk": "Qwen3-0.6B may produce incoherent text at temperature=0.7 with presence_penalty=1.5 — quality could degrade. Need to balance diversity vs coherence. Also, inference time for 8000 turns with 0.6B model must fit within 20-minute Codabench cap (should be fine at ~15 tokens/s = ~2 min total).",
+      "expected_ndcg_lift": "No nDCG lift (ranking unchanged), but +150% Distinct-2 (0.10 -> 0.25) and significant LLM-judge score improvement",
+      "source_urls": [
+        "https://huggingface.co/Qwen/Qwen3-0.6B",
+        "https://arxiv.org/abs/1904.09751",
+        "https://arxiv.org/abs/2306.05685",
+        "https://arxiv.org/abs/2307.03025"
+      ]
+    },
+    {
+      "rank": 3,
+      "name": "MLP Projection Adapter: Query-to-Track Space Alignment",
+      "innovation_angle": "Trains a lightweight MLP (2-layer, 1024->512->1024) to project conversation-state text embeddings INTO the pre-computed track embedding space, following the LiT paradigm (lock track encoder, learn query projection). Uses the 15k training sessions as supervision: positive pairs are (state_embedding, gold_track_embedding), negatives are in-batch random tracks. This solves the root cause of the state-dense retrieval failure (0.096 vs 0.121) by learning the alignment that the unknown instruction prefix would have provided.",
+      "concrete_plan": "1. Encode all training session states with Qwen3-Embedding-0.6B (same model, same batch). 2. Build training triples: (state_emb_1024d, positive_track_metadata_qwen3_emb_1024d, negative_track_emb). 3. Train 2-layer MLP with InfoNCE/contrastive loss, batch_size=256, lr=1e-3, ~5 epochs (~30 min on A100). 4. At inference, project state embeddings through learned MLP, then do cosine retrieval against frozen track embeddings. 5. Evaluate as a new retrieval leg and add to the LambdaMART feature set.",
+      "effort": "1-2 days",
+      "gpu_requirement": "small (1x 24GB)",
+      "key_risk": "The 15k sessions may not provide enough diversity for the MLP to generalize — could overfit to training genres/artists. Mitigate with dropout=0.3 and early stopping on held-out sessions. If the underlying state embeddings are poor quality, no projection can fix that.",
+      "expected_ndcg_lift": "+10-20% relative on the state-dense leg (0.096 -> 0.11-0.12), then additive value in ensemble",
+      "source_urls": [
+        "https://arxiv.org/abs/2111.07991",
+        "https://arxiv.org/abs/2410.11235",
+        "https://arxiv.org/abs/2310.19488"
+      ]
+    },
+    {
+      "rank": 4,
+      "name": "Item-Item PMI Co-occurrence Retrieval Leg",
+      "innovation_angle": "Builds a session-level item co-occurrence graph from the 15k training sessions, computes PMI (pointwise mutual information) between track pairs, and uses it as a new retrieval signal: given accepted tracks in the current session, retrieve tracks with highest aggregate PMI to the accepted set. This is orthogonal to all existing legs (content-based and CF) because it captures 'what people actually listened to together in conversations' rather than content similarity or global collaborative patterns.",
+      "concrete_plan": "1. From 15k training sessions, extract all (track_i, track_j) co-occurrence pairs within same session. Compute PMI matrix (sparse, only pairs with count >= 2). 2. At inference time, for each turn with accepted tracks A = {a1, a2, ...}, score every candidate track c as sum(PMI(a_i, c) for a_i in A). 3. Return top-100 by PMI score as a new retrieval leg. 4. Add PMI scores as features to the LambdaMART ranker. 5. Expected: provides strong signal for turns 3+ where session history exists, complementing BM25 (content) and CF (user cluster).",
+      "effort": "hours",
+      "gpu_requirement": "none",
+      "key_risk": "Coverage may be low — if the 47k track catalog is much larger than what appears in training sessions, many candidate tracks will have zero PMI with any accepted track. Sparsity could limit this to only popular tracks. Mitigate by falling back to genre-level co-occurrence for unseen tracks.",
+      "expected_ndcg_lift": "+5-10% relative as ensemble leg (0.124 -> 0.13-0.14)",
+      "source_urls": [
+        "https://arxiv.org/abs/2502.13763",
+        "https://arxiv.org/abs/1811.00855"
+      ]
+    },
+    {
+      "rank": 5,
+      "name": "Cross-Encoder Reranker: Qwen3-0.6B Pointwise Scoring on Top-50",
+      "innovation_angle": "Fine-tunes Qwen3-0.6B with LoRA as a pointwise cross-encoder that scores (conversation_context, track_metadata) pairs for relevance. Unlike bi-encoder retrieval which cannot model query-document interactions, the cross-encoder sees both simultaneously and can reason about subtle preference matches ('upbeat but not too electronic'). The innovation for the challenge paper is demonstrating that a 0.6B cross-encoder, fine-tuned on conversation-track pairs with binary relevance, matches much larger rerankers in the music domain.",
+      "concrete_plan": "1. Build training data: for each turn, positive = (conversation_so_far, gold_track_metadata) with label 1; negatives = (conversation, top-50_non_gold_tracks from existing retrieval) with label 0. ~120k pairs from 15k sessions. 2. Fine-tune Qwen3-0.6B with LoRA (rank=16) as a binary classifier: input = concat(conversation, track_meta), output = relevance score from [CLS] or last-token logit. Train 2 epochs, lr=2e-5, ~1 hour on A100. 3. At inference: retrieve top-50 from union pool, score all 50 with cross-encoder, rerank. 4. Top-20 from reranked list is the final output. 5. Inference: 50 forward passes per turn x 8000 turns = 400k passes; at ~100 pairs/sec on A100, ~1 hour total.",
+      "effort": "3-5 days",
+      "gpu_requirement": "small (1x 24GB)",
+      "key_risk": "Inference time may exceed the 20-minute Codabench cap. Mitigate by pre-computing scores and submitting result files (if allowed), or reducing to top-30 candidates. Also, 0.6B model capacity may be insufficient for nuanced music preference reasoning. Training data quality depends on existing retrieval quality (negatives must be plausible hard negatives).",
+      "expected_ndcg_lift": "+20-40% relative (0.124 -> 0.15-0.17) — cross-encoders typically add 10-30% over bi-encoders in IR benchmarks",
+      "source_urls": [
+        "https://arxiv.org/abs/2310.08319",
+        "https://arxiv.org/abs/2304.09542",
+        "https://huggingface.co/abdoelsayed/dear-8b-reranker-listwise-lora-v1"
+      ]
+    },
+    {
+      "rank": 6,
+      "name": "MMR Diversity Reranking Post-Processing",
+      "innovation_angle": "Applies Maximal Marginal Relevance as a post-processing step on the final ranked list to boost catalog diversity (currently 0.516) without sacrificing nDCG. The key finding from recent work (2026) shows that with careful lambda tuning, both nDCG and catalog coverage can improve simultaneously because diverse results reduce position-bias toward popular tracks. For the paper: demonstrates that diversity-aware reranking is non-zero-sum in conversational music recommendation when the candidate pool is already relevance-filtered.",
+      "concrete_plan": "1. After producing ranked top-20 from the LambdaMART ranker, apply MMR: iteratively select items that maximize lambda*relevance_score - (1-lambda)*max_cosine_similarity_to_selected. Use metadata_qwen3 embeddings for inter-item similarity. 2. Grid search lambda in [0.5, 0.6, 0.7, 0.8, 0.9] on devset, optimizing for combined nDCG@20 + CatDiv. 3. Apply across all sessions/turns. 4. Expected: CatDiv 0.516 -> 0.60+ with nDCG@20 stable or slightly improved (diverse results help macro-averaged nDCG by reducing repeated popular tracks).",
+      "effort": "hours",
+      "gpu_requirement": "none",
+      "key_risk": "If lambda is too low, nDCG drops as diverse-but-irrelevant tracks get promoted. The sweet spot is narrow. Also, catalog diversity is already decent (0.516) — may already be near ceiling for this candidate pool size.",
+      "expected_ndcg_lift": "nDCG stable (+/- 1%), CatDiv +15-20% (0.516 -> 0.60+)",
+      "source_urls": [
+        "https://scholar.google.com/scholar?q=maximal+marginal+relevance+diversity+recommendation+reranking"
+      ]
+    },
+    {
+      "rank": 7,
+      "name": "ConvDR-style Conversational Query Encoder (Distilled from Existing Retriever)",
+      "innovation_angle": "Trains a conversational query encoder that takes the full dialogue history and produces a single dense vector aligned with frozen track embeddings, using knowledge distillation from the existing metadata_qwen3 retriever as teacher. Unlike naive state-dense retrieval (which failed due to instruction misalignment), this learns the projection end-to-end with the actual track embedding space as target. The encoder handles coreference, ellipsis, and preference drift natively rather than requiring explicit state extraction.",
+      "concrete_plan": "1. Generate teacher labels: for each turn, the teacher is metadata_qwen3 retrieval's top-20 with scores. 2. Initialize student from Qwen3-Embedding-0.6B. Fine-tune only the query encoder with LoRA (rank=8), keeping track embeddings frozen. Input = full dialogue up to current turn (truncated to 512 tokens). 3. Training objective: KL divergence between student's retrieval distribution and teacher's top-100 scores, plus contrastive loss with gold tracks as positives. 4. Train 3 epochs on 15k sessions (~2 hours on A100). 5. At inference, encode dialogue -> single 1024d vector -> cosine retrieval against frozen track embeddings.",
+      "effort": "3-5 days",
+      "gpu_requirement": "small (1x 24GB)",
+      "key_risk": "The student may not surpass the teacher (distillation provides a ceiling). The real value is if the student learns to handle later turns better by encoding full context, whereas the teacher degrades because it just mean-pools prior track embeddings. If the dialogue context is too noisy, the student may learn to ignore it.",
+      "expected_ndcg_lift": "+10-20% relative (0.121 -> 0.13-0.15), especially on turns 5-8",
+      "source_urls": [
+        "https://github.com/thunlp/ConvDR",
+        "https://github.com/kyriemao/ChatRetriever"
+      ]
+    },
+    {
+      "rank": 8,
+      "name": "MuQ-MuLan Text-to-Audio Retrieval Leg",
+      "innovation_angle": "Replaces the failing LAION-CLAP audio retrieval with MuQ-MuLan (Tencent, Jan 2025), a 700M parameter music-text joint embedding model trained on 160k+ hours of music. Unlike CLAP which was trained on general audio, MuQ-MuLan is music-specific and achieves SOTA on music tagging. The text encoder natively handles music descriptions, enabling direct text-query-to-audio retrieval without the instruction-prefix alignment problem plaguing Qwen3-Embedding.",
+      "concrete_plan": "1. Install muq package (pip install muq). 2. Re-encode all 47k track audio files with MuQ-MuLan audio encoder (24kHz input) — ~2-3 hours on A100 for 47k 30-sec clips. 3. At inference, encode conversation query with MuQ-MuLan text encoder. 4. Cosine retrieval against audio embeddings gives a new leg. 5. Add as feature to LambdaMART ensemble. Expected: provides strong signal for mood/energy/instrument queries that text-only embeddings miss.",
+      "effort": "3-5 days",
+      "gpu_requirement": "small (1x 24GB)",
+      "key_risk": "Requires access to raw audio files for the 47k tracks — if only pre-computed embeddings are available (not raw audio), this is impossible. The muq package may not be installable via the local PyPI mirror. 700M model inference on 47k tracks needs careful batching to fit in 24GB.",
+      "expected_ndcg_lift": "+5-15% relative as a new ensemble leg, especially for mood/energy queries",
+      "source_urls": [
+        "https://arxiv.org/abs/2501.01108"
+      ]
+    },
+    {
+      "rank": 9,
+      "name": "User Embedding Retrieval Leg (CF-based Personalization)",
+      "innovation_angle": "Exploits the completely unused pre-computed user embeddings as a retrieval signal. For each user, compute cosine similarity between their user embedding and all track embeddings (using the CF-BPR space where both exist), yielding a personalized static ranking. This captures long-term preferences independent of the current conversation. The paper angle: demonstrating that static user embeddings provide additive value over conversation-derived signals, especially for cold-start turns (t1-t2) where dialogue context is minimal.",
+      "concrete_plan": "1. Load pre-computed user embeddings (128d CF-BPR space, 8772 users). 2. For each user in devset, compute cosine similarity against all 47k track CF-BPR embeddings. 3. Return top-100 per user as a static retrieval leg (same ranking every turn for a given user). 4. Add user-track similarity score as a feature in LambdaMART. 5. Also try: user_emb as initialization for the dense query (user_emb + session_signal via learned gating).",
+      "effort": "hours",
+      "gpu_requirement": "none",
+      "key_risk": "User embeddings may already be captured by the cf_bpr retrieval leg (which uses the same BPR space). If so, this adds no new signal. Also, static user preferences may conflict with conversation-expressed preferences (user normally likes rock but this session asks for jazz). Need to weight by turn — less weight on later turns where conversation context dominates.",
+      "expected_ndcg_lift": "+3-8% relative as ensemble feature (mostly helps t1-t2 cold start)",
+      "source_urls": [
+        "https://arxiv.org/abs/2402.16073",
+        "https://arxiv.org/abs/2306.03040"
+      ]
+    },
+    {
+      "rank": 10,
+      "name": "Negative Feedback Vector Subtraction in Dense Retrieval",
+      "innovation_angle": "Implements the simple but theoretically motivated approach from SIGIR 2022: when a user rejects a track, subtract its embedding (scaled by alpha) from the query vector before retrieval. This creates a dynamic query that moves AWAY from rejected tracks in embedding space. Combined with the state extractor's rejected_tags, this handles multi-turn drift where users repeatedly say 'not like that'. The novelty is applying embedding arithmetic to conversational music recommendation with explicit rejection signals.",
+      "concrete_plan": "1. From state extractor output, identify rejected tracks per turn (already extracted as rejected_tags). 2. Map rejected tags to track embeddings (lookup by track ID from prior turns). 3. Compute query vector = mean(accepted_track_embeddings) - alpha * mean(rejected_track_embeddings), with alpha grid-searched in [0.1, 0.3, 0.5, 0.7]. 4. Use modified query vector for dense retrieval (cosine against track embeddings). 5. Evaluate per-turn nDCG, especially turns 4-8 where rejections accumulate.",
+      "effort": "hours",
+      "gpu_requirement": "none",
+      "key_risk": "The baselines_v3.py already has --state_subtract_rejected flag but it operates on BM25 scores, not embeddings. The embedding-space version may over-correct if alpha is too high (pushing query into meaningless regions). Also, rejected track IDs may not always be available in the state (depends on extractor quality).",
+      "expected_ndcg_lift": "+3-8% relative on turns 4-8 specifically",
+      "source_urls": [
+        "https://scholar.google.com/scholar?q=%22Learning+to+infer+user+implicit+preference%22+conversational+recommendation+SIGIR+2022"
+      ]
+    }
+  ],
+  "meta_observations": [
+    "The recall ceiling (Hit@20 = 26.4%) is the single biggest bottleneck. The LambdaMART reranker over a wider candidate union (Hit@100 likely 35-45%) is the most efficient way to break through it without building entirely new retrieval models.",
+    "The four evaluation axes (nDCG, CatDiv, Distinct-2, LLM-judge) require parallel optimization. Ranking improvements (ideas 1,3,4,5,7) boost nDCG; response generation (idea 2) boosts Distinct-2 and judge score; MMR (idea 6) boosts CatDiv. These are complementary and should be pursued in parallel.",
+    "The state-dense retrieval failure (0.096 vs 0.121) is caused by instruction-prefix misalignment, NOT by bad state extraction. The MLP adapter (idea 3) solves this at the root rather than guessing instruction prompts. It should be attempted before any more instruction template sweeps.",
+    "The response generation component is currently the weakest link relative to the official baseline: the official LLaMA-1B baseline achieves Distinct-2 = 0.255 while the current system gets only 0.097. Fixing this (idea 2) is nearly free and could be the largest absolute score improvement if the final metric is a weighted combination.",
+    "Competition-winning patterns consistently show: (1) union pool from diverse retrievers, (2) LightGBM/CatBoost LambdaRank on rich features, (3) careful CV to avoid overfitting. This is a 1-2 day project that historically delivers 10-30% lifts in RecSys challenges.",
+    "The 13-day deadline strongly favors ideas 1, 2, 4, 6, 9, 10 (all achievable in hours to 1-2 days) over ideas 5, 7, 8 (3-5 days each with higher risk). A rational strategy is: days 1-3 implement ideas 1+2+4+6+9+10, days 4-7 attempt idea 3 or 5, days 8-12 iterate and tune, day 13 final submission.",
+    "The PMI co-occurrence leg (idea 4) and user embedding leg (idea 9) are trivially implementable and provide orthogonal signals to existing BM25/dense/CF legs. Even if each adds only 2-3% individually, they expand the union pool coverage which amplifies the LambdaMART reranker's effectiveness."
+  ],
+  "inaccessible_papers": [
+    {
+      "title": "CONQRR: Conversational Query Rewriting via Reinforcement Learning (EMNLP 2022)",
+      "url": "https://arxiv.org/abs/2112.08558",
+      "reason": "Could not verify code availability; paper PDF accessible on arxiv but no confirmed GitHub repo found"
+    },
+    {
+      "title": "CQE: Contextualized Query Embeddings for Conversational Search (EMNLP 2021)",
+      "url": "https://arxiv.org/abs/2104.08707",
+      "reason": "Paper accessible on arxiv but no code repository confirmed"
+    },
+    {
+      "title": "FPAN: Feedback-guided Preference Adaptation Network (2021)",
+      "url": "https://dl.acm.org/doi/abs/10.1145/3488560.3498504",
+      "reason": "ACM Digital Library returned 403; no GitHub repo found for implementation"
+    },
+    {
+      "title": "Learning to Infer User Implicit Preference in Conversational Recommendation (SIGIR 2022)",
+      "url": "https://dl.acm.org/doi/abs/10.1145/3477495.3531844",
+      "reason": "ACM Digital Library returned 403; no public code repository found"
+    },
+    {
+      "title": "QuReTeC: Query Resolution for Conversational Search with Limited Supervision (SIGIR 2020)",
+      "url": "https://dl.acm.org/doi/abs/10.1145/3397271.3401130",
+      "reason": "ACM paywall; code is available on GitHub but the paper PDF requires ACM access"
+    },
+    {
+      "title": "Rank Lists Fusion for Improved Results (Fox & Shaw, 1994 - CombMNZ/CombSUM)",
+      "url": "https://dl.acm.org/doi/10.1145/290941.290973",
+      "reason": "ACM Digital Library returned 403 Forbidden - paywall"
+    },
+    {
+      "title": "LLM-based Recommendation Survey (How Can Recommender Systems Benefit from LLMs)",
+      "url": "https://arxiv.org/abs/2306.05817",
+      "reason": "Only abstract accessible, full paper needed for detailed method taxonomy"
+    },
+    {
+      "title": "Is ChatGPT a Good Recommender? A Preliminary Study (CIKM 2023)",
+      "url": "https://arxiv.org/abs/2304.10149",
+      "reason": "Only abstract accessible; full paper has detailed prompting templates"
+    },
+    {
+      "title": "Yahoo Learning to Rank Challenge - Ensemble of Lambda-Gradient Models (Burges et al. 2011)",
+      "url": "https://proceedings.mlr.press/v14/burges11a.html",
+      "reason": "Only citation visible, full paper with feature engineering details not accessible"
+    },
+    {
+      "title": "SLAP: Siamese Language-Audio Pretraining Without Negative Samples",
+      "url": "https://arxiv.org/pdf/2506.17815",
+      "reason": "Abstract available but full paper with architecture details and code link not confirmed accessible"
+    },
+    {
+      "title": "PSRQ: Progressive Semantic Residual Quantization (full paper with MCCA architecture)",
+      "url": "https://arxiv.org/pdf/2508.20359",
+      "reason": "Only abstract available; full architectural details require PDF access"
+    },
+    {
+      "title": "GD-Retriever: Controllable Generative Text-Music Retrieval",
+      "url": "https://arxiv.org/pdf/2506.17886",
+      "reason": "Only abstract available; diffusion-based retrieval architecture details require PDF access"
+    },
+    {
+      "title": "LLaRA: Large Language-Recommendation Assistant",
+      "url": "https://arxiv.org/pdf/2312.02445",
+      "reason": "Abstract confirms projector exists but specific layer configuration requires full paper"
+    },
+    {
+      "title": "UniSRec (MoE adaptor architecture details)",
+      "url": "https://arxiv.org/pdf/2206.05941",
+      "reason": "Abstract describes parametric whitening + MoE adaptor but architectural specifics require full paper"
+    },
+    {
+      "title": "PISA: Transformers Meet ACT-R for Music Session Recommendation",
+      "url": "https://arxiv.org/abs/2408.16578",
+      "reason": "Abstract accessible but code repository URL not found; need PDF to find GitHub URL"
+    },
+    {
+      "title": "GCNext: Unsupervised Graph Embeddings for Session-based Recommendation",
+      "url": "https://arxiv.org/abs/2502.13763",
+      "reason": "No code repository linked on arXiv page; may need to contact authors (Schedl group)"
+    },
+    {
+      "title": "Enhancing Sequential Music Recommendation with Negative Feedback-informed Contrastive Learning",
+      "url": "https://arxiv.org/abs/2409.07367",
+      "reason": "Published at RecSys 2024; no code repository found on arXiv"
+    },
+    {
+      "title": "MemoCRS: Memory-Enhanced Sequential Conversational Recommender Systems",
+      "url": "https://arxiv.org/abs/2407.04960",
+      "reason": "No code repository linked on arXiv abstract page"
+    },
+    {
+      "title": "Pfeed: Generating Near Real-time Personalized Feeds Using Precomputed Embedding Similarities",
+      "url": "https://arxiv.org/abs/2402.16073",
+      "reason": "Paper accessible but industrial system details may require full PDF"
+    },
+    {
+      "title": "USP-SBR: Learning Similarity among Users for Personalized Session-Based Recommendation",
+      "url": "https://arxiv.org/abs/2306.03040",
+      "reason": "No code repository confirmed from abstract"
+    },
+    {
+      "title": "RecSys 2024 Challenge Workshop Proceedings (ACM DL)",
+      "url": "https://dl.acm.org/doi/proceedings/10.1145/3687151",
+      "reason": "HTTP 403 Forbidden - ACM Digital Library paywall"
+    },
+    {
+      "title": "Enhancing News Recommendation with Transformers and Ensemble Learning (Fujikawa et al., Gold winner)",
+      "url": "https://dl.acm.org/doi/10.1145/3687151.3687157",
+      "reason": "HTTP 403 Forbidden - ACM Digital Library paywall"
+    },
+    {
+      "title": "Harnessing Temporal Dynamics and Content: GBM Ensemble (Iwai et al., Bronze winner)",
+      "url": "https://dl.acm.org/doi/pdf/10.1145/3687151.3687159",
+      "reason": "ACM Digital Library paywall"
+    },
+    {
+      "title": "A Diverse Models Ensemble for Fashion Session-Based Recommendation (RecSys 2022 winner)",
+      "url": "https://dl.acm.org/doi/10.1145/3556702.3556844",
+      "reason": "HTTP 403 Forbidden - ACM Digital Library paywall"
+    },
+    {
+      "title": "TalkPlayData-Challenge Dataset (HuggingFace)",
+      "url": "https://huggingface.co/datasets/nlp4musa/TalkPlayData-Challenge",
+      "reason": "HTTP 401 Unauthorized - requires HuggingFace authentication"
+    },
+    {
+      "title": "Negation-Aware CLAP: Dissimilarity-Based Contrastive Loss for Music",
+      "url": "https://arxiv.org/abs/2601.13931",
+      "reason": "Full paper with training recipe not confirmed accessible"
+    },
+    {
+      "title": "VQ-Rec: Vector-Quantized Representations for Cross-Domain Recommendation",
+      "url": "https://arxiv.org/abs/2210.12316",
+      "reason": "Abstract available but VQ architecture details require full paper"
+    },
+    {
+      "title": "Music-specific conversational recommendation challenge papers",
+      "url": "https://arxiv.org/search/?query=music+conversational+recommendation+challenge+2026",
+      "reason": "ArXiv returned 429 Too Many Requests"
+    }
+  ]
+}
