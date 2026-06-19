@@ -19,10 +19,36 @@
 
 set -euo pipefail
 
+# ---------------------------------------------------------------------------
+# Step -1: Activate the known working environment
+# ---------------------------------------------------------------------------
+# This repo has been tested in the foundation_model conda env. Do not load a
+# standalone cuda module here; PyTorch gets its CUDA/cuDNN libraries from the
+# Python environment/user-site packages on this cluster.
+if ! command -v module >/dev/null 2>&1; then
+    if [ -f /usr/share/Modules/init/bash ]; then
+        # shellcheck disable=SC1091
+        source /usr/share/Modules/init/bash
+    fi
+fi
+
+module load anaconda
+conda activate foundation_model
+export PATH="$CONDA_PREFIX/bin:$PATH"
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+module unload cuda 2>/dev/null || true
+
 LOG="logs/pipeline.log"
 mkdir -p logs exp/ltr exp/inference/devset exp/scores/devset
 
 echo "=== Music-CRS Pipeline started at $(date) ===" | tee "$LOG"
+echo "[env] python=$(which python)" | tee -a "$LOG"
+python - <<'PY' 2>&1 | tee -a "$LOG"
+import torch
+print(f"[env] torch={torch.__version__} cuda_available={torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    print(f"[env] gpu_count={torch.cuda.device_count()} name={torch.cuda.get_device_name(0)}")
+PY
 
 # ---------------------------------------------------------------------------
 # Step 0: Ensure dependencies
