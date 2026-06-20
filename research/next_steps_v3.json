@@ -1,0 +1,232 @@
+{
+  "ranked_ideas": [
+    {
+      "rank": 1,
+      "name": "Expand retrieval legs to output top-100 and increase candidate pool ceiling",
+      "rationale": "The binding constraint is recall ceiling. Current legs output only top-20 each, yielding ~96 unique candidates per turn with 40.5% gold-in-pool. 907 golds are in pool but ranked beyond top-20 by the LTR. Expanding legs to output 100 candidates each would grow the pool to ~300-400 unique candidates, raising gold-in-pool from 40.5% to approximately 55-60%. With 30% Hit@20 currently and 74.2% reranking efficiency within pool, a 50% increase in gold-in-pool translates directly to ~+0.04-0.05 nDCG@20. This is the single highest-ceiling change.",
+      "concrete_implementation": "1. Modify baselines_v3.py line 612: change `if len(preds) == 20` to `if len(preds) == args.n_output` and add `--n_output 100` arg (default 100).\n2. Re-run all 8 legs with `--n_output 100`:\n   ```bash\n   for leg in metadata_qwen3 cf_bpr bm25_norepeat_states state_dense_metadata state_dense_attributes state_dense_lyrics; do\n     python src/baselines_v3.py --embed ... --n_output 100 --out exp/inference/devset/${leg}_top100.json\n   done\n   python src/retrieval_legs.py pmi --out exp/inference/devset/pmi_leg_top100.json  # modify top_indices[:100]\n   python src/retrieval_legs.py user_emb --out exp/inference/devset/user_emb_leg_top100.json\n   ```\n3. Re-run train_ltr.py with `--top_k 100` using the new *_top100.json legs.\n4. Expected pool size: ~400 candidates/turn. Retrain LightGBM on larger pool.",
+      "effort": "1 day (re-running 8 legs ~10min each + LTR retrain ~10min)",
+      "expected_lift": "+0.03-0.05 nDCG@20 (from ceiling expansion alone)",
+      "risk": "If the extra candidates are all low-quality noise, the ranker may be overwhelmed and ranking quality within top-20 could degrade. Mitigated by also improving the ranker (experiments 2-4).",
+      "source_urls": [
+        "https://eugeneyan.com/writing/system-design-for-discovery/"
+      ]
+    },
+    {
+      "rank": 2,
+      "name": "Fix turn-1 tokenization and add entity-matching retrieval leg",
+      "rationale": "Turn 1 has Hit@20=23.4% vs 38.4% at turn 2 -- a 15pp gap. 269/1000 turn-1 queries contain the gold artist/track name, yet 54 of these golds are NOT in the pool due to tokenization failures. The regex r'[A-Za-z0-9]+' destroys compound names (Heart-Shaped, AC/DC). Additionally, 79 entity-mentioned golds miss top-20 entirely. Fixing tokenization + adding a direct catalog entity lookup would immediately boost turn-1 from 23.4% to ~30% Hit@20, adding ~0.008 nDCG@20.",
+      "concrete_implementation": "1. Replace tokenizer in baselines_v3.py:\n   ```python\n   import unicodedata\n   _TOKEN_RE = re.compile(r\"[\\w$](?:[\\w$'/&-]*[\\w$])?\", re.UNICODE)\n   _PAREN_RE = re.compile(r'\\s*\\([^)]*\\)\\s*$')\n   def tokenize(text: str) -> List[str]:\n       text = unicodedata.normalize('NFKD', text or '')\n       text = ''.join(c for c in text if not unicodedata.combining(c))\n       text = _PAREN_RE.sub('', text)\n       return [t.lower() for t in _TOKEN_RE.findall(text) if t.lower() not in _STOP]\n   ```\n2. Add entity-matching pre-pass in baselines_v3.py:\n   - Build normalized catalog dict: {normalize(track_name + ' ' + artist_name): track_id}\n   - At turn 1, before BM25: use `rapidfuzz.process.extractOne(query, catalog_keys, scorer=token_set_ratio, score_cutoff=85)` to find exact entity matches\n   - If match found, inject matched track_id at rank 0 of this leg's output\n3. Install rapidfuzz: `pip install rapidfuzz` (via Artifactory mirror)\n4. Re-run BM25 legs with fixed tokenizer. Run entity-matching as a new 9th leg.",
+      "effort": "0.5 days",
+      "expected_lift": "+0.008-0.012 nDCG@20 (turn-1 improvement from 23.4% to 30-32% Hit@20)",
+      "risk": "Some turn-1 queries mention artists but want a DIFFERENT track (e.g., 'something like Slipknot' wants a Slipknot track but not the one mentioned). Entity matching may over-index on the mentioned name. Mitigated by using it as one leg input to the ranker, not as a hard override.",
+      "source_urls": [
+        "https://docs.python.org/3/library/unicodedata.html",
+        "https://github.com/rapidfuzz/RapidFuzz",
+        "https://github.com/metabrainz/mbsssss"
+      ]
+    },
+    {
+      "rank": 3,
+      "name": "LightGBM feature engineering: cross-leg features + regularization tuning",
+      "rationale": "The LTR uses only 12 trees with 75% feature importance concentrated in 2 features. 907 golds are in-pool but miss top-20 -- most (51%) appear in only 1 leg. The ranker over-relies on n_legs_containing and under-utilizes the other 20 features. Adding cross-features (rank variance, best/worst rank, rank-product, score-ratio) + tuning regularization (lower LR=0.01, more trees, feature_fraction_bynode=0.6) would help the model distinguish 'good single-leg items' from noise.",
+      "concrete_implementation": "1. In train_ltr.py build_features(), add after existing features:\n   ```python\n   # Cross-leg features\n   ranks = [feats[i*2] for i in range(n_legs)]  # all rank values\n   scores = [feats[i*2+1] for i in range(n_legs)]  # all RRF scores\n   feats.append(float(np.std(ranks)))       # rank_variance\n   feats.append(float(min(ranks)))          # best_rank\n   feats.append(float(max(ranks)))          # worst_rank\n   feats.append(float(np.prod([1/(60+r) for r in ranks if r < top_k+1]) if any(r < top_k+1 for r in ranks) else 0))  # rank_product\n   feats.append(float(max(scores) / (sorted(scores, reverse=True)[1] + 1e-9) if sum(1 for s in scores if s > 0) >= 2 else 0))  # score_ratio\n   feats.append(sum(1/(60+r) for r in ranks if r < top_k+1))  # reciprocal_rank_sum\n   ```\n2. Update LightGBM params:\n   ```python\n   params = {\n       'objective': 'lambdarank',\n       'metric': 'ndcg',\n       'lambdarank_truncation_level': 25,\n       'num_leaves': 31,\n       'learning_rate': 0.01,\n       'min_data_in_leaf': 50,\n       'feature_fraction': 0.7,\n       'feature_fraction_bynode': 0.6,\n       'bagging_fraction': 0.8,\n       'bagging_freq': 5,\n       'lambda_l1': 0.1,\n       'lambda_l2': 1.0,\n       'min_gain_to_split': 0.01,\n       'verbose': -1,\n       'n_jobs': -1,\n   }\n   # Increase num_boost_round to 500, early_stopping to 50\n   ```\n3. Re-train with expanded pool from experiment 1.",
+      "effort": "0.5 days",
+      "expected_lift": "+0.01-0.02 nDCG@20 (better discrimination of single-leg golds + improved rank position)",
+      "risk": "Overfitting with more features on a relatively small dataset. Mitigated by 5-fold CV and regularization. If validation NDCG decreases, back off on feature count.",
+      "source_urls": [
+        "https://lightgbm.readthedocs.io/en/latest/Parameters-Tuning.html",
+        "https://eugeneyan.com/writing/system-design-for-discovery/"
+      ]
+    },
+    {
+      "rank": 4,
+      "name": "Cross-encoder with hard negatives from retrieval pool (SimANS-style)",
+      "rationale": "The previous cross-encoder attempt used random negatives and scored WORSE because the model trivially distinguished random tracks (12 trees early-stop confirms signal was too easy). The research shows that 'ambiguous' negatives (ranks 10-50 from retrieval) provide the right difficulty. With an expanded pool of ~400 candidates per turn, the cross-encoder can be trained on genuinely confusing negatives and used either as (a) an additional feature for LightGBM, or (b) a second-stage reranker on the top-40.",
+      "concrete_implementation": "1. Modify train_crossencoder.py cmd_build_data() to mine hard negatives:\n   ```python\n   # Load retrieval legs for TRAIN split (re-run baselines on train sessions)\n   # For each (session, turn), take candidates ranked 10-50 that are NOT gold\n   hard_neg_pool = load_train_legs(args.hard_neg_dir)  # pre-computed\n   for turn in range(1,9):\n       gold_id = ...\n       hard_negs = [t for t in hard_neg_pool[(session_id, turn)][10:50] if t != gold_id]\n       # Sample 3 hard + 2 random negatives per positive\n       neg_ids = random.sample(hard_negs, min(3, len(hard_negs))) + random.sample(all_track_ids, 2)\n   ```\n2. Train Qwen3-0.6B cross-encoder with mixed hard+random negatives:\n   ```bash\n   python src/train_crossencoder.py build_data --out data/ce_hard_neg.jsonl --n_neg 5 --hard_neg_dir exp/inference/train/\n   python src/train_crossencoder.py train --train_jsonl data/ce_hard_neg.jsonl --model_id Qwen/Qwen3-0.6B --epochs 2 --lr 1e-4 --batch_size 16 --max_seq_len 768\n   ```\n3. Use cross-encoder scores as an additional feature in LightGBM (score top-100 candidates, add as 'ce_score' feature) rather than as a standalone reranker.\n4. GPU: H100, training ~45min, inference scoring ~20min.",
+      "effort": "2 days (need to run retrieval on train split first, then train CE, then integrate)",
+      "expected_lift": "+0.01-0.015 nDCG@20 (cross-encoder captures semantic relevance the tree model cannot)",
+      "risk": "Hard negatives from retrieval may include false negatives (tracks the user WOULD like but aren't the gold). If CE score as a feature hurts, fall back to using it only for top-40 reranking. Dead indicator: validation nDCG drops when adding CE feature.",
+      "source_urls": [
+        "https://arxiv.org/abs/2210.11773",
+        "https://arxiv.org/abs/2007.00808"
+      ]
+    },
+    {
+      "rank": 5,
+      "name": "LLM query expansion (Query2doc-style) for BM25 recall boost",
+      "rationale": "70.4% of turn-1 queries are vague/descriptive (no exact entity name) -- e.g., 'something chill from the 90s'. BM25 fails when query vocabulary doesn't match track metadata vocabulary. Query2doc shows 3-15% recall improvement by using an LLM to expand the query into a pseudo-document that bridges the vocabulary gap. With Qwen3-8B available locally, this is a zero-retraining recall expander.",
+      "concrete_implementation": "1. Create query_expand.py:\n   ```python\n   from transformers import AutoModelForCausalLM, AutoTokenizer\n   model = AutoModelForCausalLM.from_pretrained('Qwen/Qwen3-8B', device_map='auto', torch_dtype=torch.bfloat16)\n   \n   PROMPT = '''Given a music recommendation query, generate a detailed description of the ideal track including: genre, mood, decade, tempo, instruments, similar artists, and tags.\n   Query: {query}\n   Ideal track description:'''\n   \n   # For each turn, generate expansion:\n   expanded = generate(PROMPT.format(query=user_msg), max_new_tokens=100)\n   # Append expansion tokens to BM25 query\n   bm25_query = tokenize(user_msg + ' ' + expanded)\n   ```\n2. Run on all 8000 turns (batched, H100, ~30min for 8000 queries at 100 tokens each).\n3. Save expanded queries to `exp/query_expansions.jsonl`.\n4. Re-run BM25 leg with expanded queries as a new 'bm25_expanded' leg.\n5. Add to the LTR ensemble pool.",
+      "effort": "1.5 days (inference + integration + evaluation)",
+      "expected_lift": "+0.005-0.01 nDCG@20 (recall improvement on vague queries, especially turns 1, 7, 8)",
+      "risk": "LLM may hallucinate irrelevant expansions that pollute BM25 scoring. If recall doesn't improve, the expansion quality is too low. Dead indicator: gold-in-pool for the expanded BM25 leg is not better than the existing BM25 leg.",
+      "source_urls": [
+        "https://arxiv.org/abs/2303.07678",
+        "https://arxiv.org/abs/2305.03653"
+      ]
+    },
+    {
+      "rank": 6,
+      "name": "LightGBM + CatBoost YetiRank ensemble (model diversity)",
+      "rationale": "With 12 trees early-stopping, the LightGBM model underfits some query groups while being overconfident on others. CatBoost's symmetric tree structure and ordered boosting produce fundamentally different predictions. Blending LightGBM + CatBoost typically yields 1-3% improvement in recommendation competitions. The Lavka RS 2025 winner used CatBoost ranker with similar feature types.",
+      "concrete_implementation": "1. Install CatBoost: `pip install catboost`\n2. Train CatBoost ranker alongside LightGBM in train_ltr.py:\n   ```python\n   from catboost import CatBoost, Pool\n   train_pool = Pool(X_train, label=y_train, group_id=train_group_ids)\n   val_pool = Pool(X_val, label=y_val, group_id=val_group_ids)\n   cb_model = CatBoost({\n       'loss_function': 'YetiRank',\n       'eval_metric': 'NDCG:top=20',\n       'iterations': 500,\n       'learning_rate': 0.03,\n       'depth': 6,\n       'l2_leaf_reg': 3.0,\n       'random_seed': 42,\n       'verbose': 50\n   })\n   cb_model.fit(train_pool, eval_set=val_pool, early_stopping_rounds=50)\n   ```\n3. Blend OOF predictions: `final_score = 0.6 * lgbm_score + 0.4 * catboost_score`\n4. Tune blend weight on validation fold.\n5. Also try XGBoost rank:ndcg as a third member: `xgb.train({'objective': 'rank:ndcg', 'lambdarank_pair_method': 'mean'})`",
+      "effort": "1 day",
+      "expected_lift": "+0.005-0.01 nDCG@20",
+      "risk": "If both models learn essentially the same signal (n_legs_containing dominance), blending won't help. Dead indicator: correlation between OOF predictions > 0.95.",
+      "source_urls": [
+        "https://catboost.ai/en/docs/concepts/loss-functions-ranking",
+        "https://github.com/almayor/lavka-rs-contest",
+        "https://xgboost.readthedocs.io/en/stable/tutorials/learning_to_rank.html"
+      ]
+    },
+    {
+      "rank": 7,
+      "name": "Target encoding + entity-level statistical features",
+      "rationale": "Current features are purely rank-based (from retrieval) plus basic metadata (popularity, turn). Competition winners (Lavka RS, RecSys 2024) consistently add entity-level statistics: artist acceptance rate, genre acceptance rate, track historical acceptance rate. With 15k train sessions, there is enough data to compute stable target encodings. These capture 'this artist is frequently accepted in conversations' signals that raw ranks cannot express.",
+      "concrete_implementation": "1. From train sessions, compute:\n   - `artist_accept_rate[artist_id]` = #times artist's tracks accepted / #times appeared as candidate\n   - `genre_accept_rate[genre]` = same for genre\n   - `track_accept_rate[track_id]` = direct track acceptance rate (smoothed with Bayesian prior)\n   - `artist_diversity_score` = how many different sessions accepted this artist\n2. Use sklearn TargetEncoder with cv=5 for train, direct lookup for test:\n   ```python\n   from sklearn.preprocessing import TargetEncoder\n   # For train: fit_transform with internal CV to prevent leakage\n   # For test: transform using fitted encoder\n   ```\n3. Add features to LTR: `artist_accept_rate`, `genre_accept_rate`, `track_smoothed_rate`, `artist_session_diversity`\n4. These are especially powerful for single-leg golds (the 51% of missed golds) -- a track by a popular artist that appears in only 1 leg should still rank higher.",
+      "effort": "1 day",
+      "expected_lift": "+0.005-0.01 nDCG@20",
+      "risk": "Cold-start: some test tracks/artists may not appear in training data. Mitigated by Bayesian smoothing toward global mean. Dead indicator: feature importance for new features < 1% of total gain.",
+      "source_urls": [
+        "https://scikit-learn.org/stable/modules/generated/sklearn.preprocessing.TargetEncoder.html",
+        "https://github.com/almayor/lavka-rs-contest"
+      ]
+    },
+    {
+      "rank": 8,
+      "name": "Tag-based attribute filtering + SPLADE-style learned sparse expansion",
+      "rationale": "For vague queries like 'chill 90s music', BM25 misses tracks tagged 'relaxing' or 'ambient' because of vocabulary mismatch. The state extractor already extracts structured attributes (genre, mood, era). Using these to pre-filter or boost tracks that match extracted attributes, combined with SPLADE or BGE-M3 learned sparse retrieval that performs automatic term expansion, could add a fundamentally different retrieval signal that captures the 703 turn-1 golds currently in neither BM25 nor dense retrieval.",
+      "concrete_implementation": "1. Simple version (1 day): Tag-boost BM25 leg\n   ```python\n   # For each turn, extract attributes from state extractor\n   state = states_by_turn[(session_id, turn)]\n   mood_tags = state.get('mood', [])  # e.g., ['chill', 'relaxing']\n   # Expand mood tags using embedding neighbors:\n   expanded_moods = expand_tags(mood_tags, tag_embeddings, top_k=5)\n   # Boost BM25 scores for tracks whose tag_list overlaps expanded attributes\n   tag_boost = np.zeros(n_tracks)\n   for tid_idx, meta in enumerate(track_metas):\n       overlap = len(set(meta['tag_list']) & set(expanded_moods))\n       tag_boost[tid_idx] = overlap * 0.5\n   final_scores = bm25_scores + tag_boost\n   ```\n2. Advanced version (3 days): Fine-tune BGE-M3 on music data for learned sparse retrieval:\n   ```bash\n   # Use FlagEmbedding library\n   pip install FlagEmbedding\n   # Encode all tracks with BGE-M3 (dense + sparse + colbert)\n   # Use sparse component as a new retrieval leg\n   ```\n3. Add as new retrieval leg(s) to the pool.",
+      "effort": "1-3 days (simple tag-boost: 1 day; BGE-M3: 3 days)",
+      "expected_lift": "+0.005-0.008 nDCG@20 (tag-boost), +0.01-0.015 nDCG@20 (BGE-M3 learned sparse)",
+      "risk": "Tag-boost may be redundant with existing state-dense legs. BGE-M3 may not have been trained on music-domain vocabulary. Dead indicator: new leg's gold-in-top-100 is not better than existing BM25 leg.",
+      "source_urls": [
+        "https://arxiv.org/abs/2402.03216",
+        "https://arxiv.org/abs/2109.10086",
+        "https://github.com/FlagOpen/FlagEmbedding"
+      ]
+    }
+  ],
+  "inaccessible_papers": [
+    {
+      "title": "Rank-without-GPT: Building GPT-Independent Listwise Rerankers on Open-Source Large Language Models",
+      "url": "https://arxiv.org/abs/2312.02969",
+      "reason": "Only abstract available; full paper needed for training data generation details and specific listwise loss formulations"
+    },
+    {
+      "title": "Expando-Mono-Duo Design Pattern for Text Ranking",
+      "url": "https://arxiv.org/abs/2101.05667",
+      "reason": "Abstract only; need full paper for MonoT5/DuoT5 loss function details and pairwise vs pointwise comparison results"
+    },
+    {
+      "title": "DPR: Dense Passage Retrieval for Open-Domain Question Answering",
+      "url": "https://arxiv.org/abs/2004.04906",
+      "reason": "PDF not parseable; need full paper for the ablation study showing 1 BM25 hard negative + in-batch negatives is optimal"
+    },
+    {
+      "title": "RankVicuna: Zero-Shot Listwise Document Reranking with Open-Source LLMs",
+      "url": "https://arxiv.org/abs/2309.15088",
+      "reason": "Only abstract available; need full paper for distillation pipeline details from GPT-4 listwise outputs to 7B model"
+    },
+    {
+      "title": "Query Expansion by Prompting Large Language Models (CoT-based)",
+      "url": "https://arxiv.org/abs/2305.03653",
+      "reason": "Abstract accessible but full paper PDF needed for specific recall/MAP improvement numbers and CoT prompting templates"
+    },
+    {
+      "title": "To Interpolate or not to Interpolate: PRF, Dense and Sparse Retrievers",
+      "url": "https://arxiv.org/abs/2205.00235",
+      "reason": "Abstract accessible but full paper PDF needed for detailed quantitative recall gains across datasets"
+    },
+    {
+      "title": "VRSD: Vector Retrieval with Similarity and Diversity",
+      "url": "https://arxiv.org/abs/2407.04573",
+      "reason": "Abstract accessible but full paper needed for implementation details of the greedy heuristic algorithm"
+    },
+    {
+      "title": "Knowledge graph music recommendation papers",
+      "url": "https://arxiv.org/search/?query=knowledge+graph+music+recommendation",
+      "reason": "ArXiv rate-limited (HTTP 429) during search - could not retrieve music-specific KG papers"
+    },
+    {
+      "title": "TalkPlay: Multimodal Music Recommendation via a Large Language Model (full PDF)",
+      "url": "https://arxiv.org/abs/2502.13713",
+      "reason": "Only abstract and HTML extraction available; full PDF needed for complete architecture details, training procedure, and ablation study specifics"
+    },
+    {
+      "title": "TalkPlay-Tools: LLM Tool Calling for Music Recommendation",
+      "url": "https://scholar.google.com/scholar?q=TalkPlay-Tools+LLM+tool+calling+music+recommendation",
+      "reason": "Found via Google Scholar snippet only; no direct arXiv link or PDF accessible. Need full paper for tool specification details and SQL query templates."
+    },
+    {
+      "title": "GCRS: Generative Conversational Recommender System (Zhang, Liu, Long 2026)",
+      "url": "https://scholar.google.com/scholar?q=GCRS+generative+conversational+recommender+system+2026+Zhang+Liu",
+      "reason": "Found via Google Scholar only; full paper needed for semantic ID construction method and constrained decoding algorithm details"
+    },
+    {
+      "title": "Rank-GRPO / ConvRec-R1 paper",
+      "url": "https://arxiv.org/search/?query=ConvRec+GRPO+conversational+recommendation",
+      "reason": "ArXiv rate-limited during search; could not access full paper. Need details on reward function design and list-level optimization."
+    },
+    {
+      "title": "CUPID: Contrastive User Preference Modeling (Kumar et al. 2026)",
+      "url": "https://arxiv.org/search/?query=CUPID+contrastive+user+preference+conversational+recommendation",
+      "reason": "ArXiv rate-limited; only Google Scholar snippet available. Need full contrastive learning methodology."
+    },
+    {
+      "title": "RecSys Challenge 2025 Gold Medal Papers (Sawada, Colecchia)",
+      "url": "https://www.recsyschallenge.com/2025/",
+      "reason": "Individual team papers not yet publicly available or not indexed; only challenge overview accessible"
+    },
+    {
+      "title": "PCRS-TKA: Tree-Structured Knowledge Augmentation (AAAI 2026)",
+      "url": "https://scholar.google.com/scholar?q=PCRS-TKA+prompt+conversational+recommendation+retrieval+augmented+generation",
+      "reason": "Only abstract snippet from Google Scholar; full paper needed for tree construction and RAG pipeline details"
+    },
+    {
+      "title": "RecSys 2024 Challenge 1st Place: Enhancing News Recommendation with Transformers and Ensemble Learning (Fujikawa et al.)",
+      "url": "http://www.recsyschallenge.com/2024/",
+      "reason": "Challenge website lists winners but full paper with hyperparameters/features is only in ACM RecSys 2024 workshop proceedings (paywalled via ACM DL)"
+    },
+    {
+      "title": "RecSys 2024 Challenge 3rd Place: Harnessing Temporal Dynamics and Content: An Ensemble of Gradient Boosting Machines for News Recommendation (Iwai et al.)",
+      "url": "http://www.recsyschallenge.com/2024/",
+      "reason": "Title confirms gradient boosting ensemble approach but implementation details are in paywalled proceedings"
+    },
+    {
+      "title": "OTTO Recommender System Competition 1st Place Solution (Chris Deotte)",
+      "url": "https://www.kaggle.com/competitions/otto-recommender-system/discussion/382975",
+      "reason": "Kaggle discussion page returns only title without body content via WebFetch; requires authenticated Kaggle session to read full writeup"
+    },
+    {
+      "title": "H&M Personalized Fashion Recommendations 1st Place Solution",
+      "url": "https://www.kaggle.com/competitions/h-and-m-personalized-fashion-recommendations/discussion/324070",
+      "reason": "Same Kaggle authentication issue -- page title visible but solution content not accessible via WebFetch"
+    },
+    {
+      "title": "StackOverflow/DataScience StackExchange discussions on LightGBM ranking tuning",
+      "url": "https://datascience.stackexchange.com/questions/tagged/lightgbm+ranking",
+      "reason": "HTTP 402 Payment Required -- StackExchange appears to block automated fetching"
+    },
+    {
+      "title": "ArXiv search for 'music named entity recognition artist song'",
+      "url": "https://arxiv.org/search/?query=music+named+entity+recognition+artist+song&searchtype=all",
+      "reason": "ArXiv returned no results for this query. Music NER appears to be an under-researched area with no dedicated papers found."
+    },
+    {
+      "title": "ArXiv search for 'conversational music recommendation'",
+      "url": "https://arxiv.org/search/?query=conversational+music+recommendation&searchtype=all",
+      "reason": "HTTP 429 rate-limited by arxiv.org. Could not retrieve results."
+    }
+  ],
+  "key_insights": [
+    "Legs currently output only top-20 (not top-100) each, yielding ~96 unique candidates per turn. Pool gold rate is 40.5%, NOT 33.4% as previously estimated.",
+    "Reranking efficiency is only 34.8% of oracle (nDCG if gold always at rank 1). The ranker puts gold in top-20 only 74.2% of the time when gold IS in the pool. Mean gold rank when found = 7.2.",
+    "907 golds are in-pool but outside top-20. 51% of these appear in only 1 leg -- the n_legs_containing feature correctly identifies multi-leg items but cannot rescue good single-leg items.",
+    "Turn-1 ceiling (gold-in-pool) is 29.7% -- already close to the 23.4% Hit@20, meaning turn-1 is recall-bound. 704/1000 turn-1 golds are in NEITHER BM25 nor dense legs.",
+    "269/1000 turn-1 queries explicitly mention the gold artist/track name, but 54 of these golds still miss the pool entirely due to tokenization destroying compound names.",
+    "The highest-ROI change is expanding leg output from 20 to 100 candidates (pool expansion from ~96 to ~400), which raises the absolute ceiling dramatically across all turns.",
+    "Cross-encoder failed because random negatives were trivially distinguishable (confirming SimANS insight). Hard negatives from ranks 10-50 of the retrieval pipeline are required.",
+    "Model ensemble (LightGBM + CatBoost) is low-hanging fruit given the 12-tree early-stop problem indicates the single model is capacity-limited."
+  ]
+}
