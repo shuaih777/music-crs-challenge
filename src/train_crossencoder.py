@@ -197,6 +197,7 @@ def cmd_train(args) -> None:
         trust_remote_code=True,
         device_map="auto" if device == "cuda" else None,
     )
+    model.config.pad_token_id = tok.pad_token_id
 
     # LoRA
     lora_config = LoraConfig(
@@ -296,6 +297,7 @@ def cmd_rerank(args) -> None:
             torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
             device_map="auto" if device == "cuda" else None,
         )
+        base.config.pad_token_id = tok.pad_token_id
         model = PeftModel.from_pretrained(base, args.model_dir)
     else:
         tok = AutoTokenizer.from_pretrained(args.model_dir, trust_remote_code=True)
@@ -306,6 +308,7 @@ def cmd_rerank(args) -> None:
             torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
             device_map="auto" if device == "cuda" else None,
         )
+        model.config.pad_token_id = tok.pad_token_id
     model.eval()
 
     # Load inference + metadata + conversations
@@ -344,7 +347,7 @@ def cmd_rerank(args) -> None:
                          truncation=True, max_length=512).to(device)
             with torch.no_grad():
                 out = model(**inputs)
-                batch_scores = out.logits.squeeze(-1).cpu().numpy()
+                batch_scores = out.logits.squeeze(-1).float().cpu().numpy()
                 if batch_scores.ndim == 0:
                     batch_scores = np.array([float(batch_scores)])
                 scores.extend(batch_scores.tolist())

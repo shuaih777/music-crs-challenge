@@ -178,7 +178,7 @@ def main() -> None:
                 # Score = log-sum-exp of top-k token logits (proxy for "how
                 # likely is the model to continue positively")
                 top_logits = torch.topk(last_logits, k=20, dim=-1).values
-                batch_scores = top_logits.mean(dim=-1).cpu().numpy()
+                batch_scores = top_logits.float().mean(dim=-1).cpu().numpy()
                 scores.extend(batch_scores.tolist())
 
         # Rerank by score
