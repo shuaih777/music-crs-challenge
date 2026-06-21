@@ -51,31 +51,18 @@ from _device import get_device, has_torch
 # Tokenization
 # ----------------------------------------------------------------------------
 
-import unicodedata
-
-# Unicode-aware tokenizer: keeps hyphens within words (Heart-Shaped),
-# dollar signs ($uicideboy$), slashes (AC/DC), apostrophes (don't).
-# Properly handles Beyoncé → beyonce, Sigur Rós → sigur ros via NFKD.
-_TOKEN_RE = re.compile(r"[\w$](?:[\w$'/&-]*[\w$])?", re.UNICODE)
-_PAREN_RE = re.compile(r'\s*\([^)]*\b(?:remaster(?:ed)?|version|edit(?:ed)?|live|deluxe|bonus|remix(?:ed)?)\b[^)]*\)\s*$', re.IGNORECASE)
+_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 _STOP = set(
-    "a an and of in on at to for from by is are was were be been being "
+    "a an and the of in on at to for from by is are was were be been being "
     "this that these those it its as with or but if then so than into about "
     "i me my you your we our they them he she his her us i'm i'll i've don't "
     "doesn't can't would should could like want some any new song songs music "
     "track tracks recommend recommendation play listen listening".split()
 )
-# NOTE: removed "the" from stopwords — "The Beatles", "The Weeknd" need it
 
 
 def tokenize(text: str) -> List[str]:
-    """Unicode-aware tokenizer that handles music entity names correctly."""
-    # NFKD normalization: Beyoncé → Beyonce, Sigur Rós → Sigur Ros
-    text = unicodedata.normalize('NFKD', text or '')
-    text = ''.join(c for c in text if not unicodedata.combining(c))
-    # Strip parenthetical suffixes like "(Remastered 2011)"
-    text = _PAREN_RE.sub('', text)
-    return [t.lower() for t in _TOKEN_RE.findall(text) if t.lower() not in _STOP]
+    return [t for t in _TOKEN_RE.findall((text or "").lower()) if t not in _STOP]
 
 
 # ----------------------------------------------------------------------------
