@@ -49,7 +49,7 @@ run_leg() {
         --output "$OUT" \
         --n_output 100 \
         "$@" \
-        2>&1 | grep -E "dense used|state query|no-repeat|Wrote" | tee -a "$LOG"
+        2>&1 | { grep -E "dense used|state query|no-repeat|Wrote" || true; } | tee -a "$LOG"
 }
 
 # Core legs (no lyrics — confirmed harmful by TalkPlay paper)
@@ -129,13 +129,13 @@ PYTHONPATH=src python src/train_ltr.py \
     --pmi_path exp/item2item_pmi.npz \
     --out_model exp/ltr/lgbm_day1_nosiglip.txt \
     --out_inference exp/inference/devset/lgbm_day1_nosiglip.json \
-    2>&1 | grep -E "positive|fold|Feature|importance" | tee -a "$LOG"
+    2>&1 | { grep -E "positive|fold|Feature|importance" || true; } | tee -a "$LOG"
 
 PYTHONPATH=src python src/evaluate.py \
     --inference exp/inference/devset/lgbm_day1_nosiglip.json \
     --scores exp/scores/devset/lgbm_day1_nosiglip.json \
     --ground_truth exp/ground_truth/devset.json \
-    2>&1 | grep -E "ndcg@20|hit@20" | tee -a "$LOG"
+    2>&1 | { grep -E "ndcg@20|hit@20" || true; } | tee -a "$LOG"
 
 # Variant B: with siglip2
 LEGS_WITH_SIGLIP="meta_v2_top100,cf_v2_top100,pmi_v2_top100,attr_v2_top100,bm25_v2_top100,last_v2_top100,siglip_v2_top100"
@@ -150,13 +150,13 @@ PYTHONPATH=src python src/train_ltr.py \
     --pmi_path exp/item2item_pmi.npz \
     --out_model exp/ltr/lgbm_day1_siglip.txt \
     --out_inference exp/inference/devset/lgbm_day1_siglip.json \
-    2>&1 | grep -E "positive|fold|Feature|importance" | tee -a "$LOG"
+    2>&1 | { grep -E "positive|fold|Feature|importance" || true; } | tee -a "$LOG"
 
 PYTHONPATH=src python src/evaluate.py \
     --inference exp/inference/devset/lgbm_day1_siglip.json \
     --scores exp/scores/devset/lgbm_day1_siglip.json \
     --ground_truth exp/ground_truth/devset.json \
-    2>&1 | grep -E "ndcg@20|hit@20" | tee -a "$LOG"
+    2>&1 | { grep -E "ndcg@20|hit@20" || true; } | tee -a "$LOG"
 
 # =============================================================================
 # Step 3: Pick winner + add responses

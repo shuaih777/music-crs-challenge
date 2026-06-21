@@ -57,7 +57,7 @@ import unicodedata
 # dollar signs ($uicideboy$), slashes (AC/DC), apostrophes (don't).
 # Properly handles Beyoncé → beyonce, Sigur Rós → sigur ros via NFKD.
 _TOKEN_RE = re.compile(r"[\w$](?:[\w$'/&-]*[\w$])?", re.UNICODE)
-_PAREN_RE = re.compile(r'\s*\([^)]*(?:remaster|version|edit|live|deluxe|bonus|remix)[^)]*\)\s*$', re.IGNORECASE)
+_PAREN_RE = re.compile(r'\s*\([^)]*\b(?:remaster(?:ed)?|version|edit(?:ed)?|live|deluxe|bonus|remix(?:ed)?)\b[^)]*\)\s*$', re.IGNORECASE)
 _STOP = set(
     "a an and of in on at to for from by is are was were be been being "
     "this that these those it its as with or but if then so than into about "
@@ -625,8 +625,13 @@ def run(args: argparse.Namespace) -> None:
                 preds.append(tid)
                 if len(preds) == n_output:
                     break
+            # Pad if needed (rare); avoid duplicates
+            seen_preds = set(preds)
             while len(preds) < n_output:
-                preds.append(track_ids[int(np.random.randint(len(track_ids)))])
+                r = track_ids[int(np.random.randint(len(track_ids)))]
+                if r not in seen_preds:
+                    preds.append(r)
+                    seen_preds.add(r)
 
             top_meta = tracks_by_id.get(preds[0], {})
             tn_n = top_meta.get("track_name", [""])
