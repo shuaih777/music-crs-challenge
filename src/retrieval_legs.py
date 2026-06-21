@@ -101,7 +101,7 @@ def run_pmi(args) -> None:
             for idx in prior_idx:
                 scores[idx] = -1e9
 
-            top_indices = np.argsort(-scores)[:20]
+            top_indices = np.argsort(-scores)[:args.n_output]
             preds = [track_ids[i] for i in top_indices]
 
             rows.append({
@@ -206,7 +206,7 @@ def run_user_emb(args) -> None:
                 if t in track_to_idx_local:
                     scores[track_to_idx_local[t]] = -1e9
 
-            top_indices = np.argsort(-scores)[:20]
+            top_indices = np.argsort(-scores)[:args.n_output]
             preds = [track_ids[i] for i in top_indices]
 
             rows.append({
@@ -310,7 +310,7 @@ def run_neg_feedback(args) -> None:
             for idx in prior_idx:
                 scores[idx] = -1e9
 
-            top_indices = np.argsort(-scores)[:20]
+            top_indices = np.argsort(-scores)[:args.n_output]
             preds = [track_ids_list[i] for i in top_indices]
 
             rows.append({
@@ -337,16 +337,19 @@ def main() -> None:
     pmi_p = sub.add_parser("pmi", help="Item-item PMI co-occurrence retrieval")
     pmi_p.add_argument("--pmi_path", default="exp/item2item_pmi.npz")
     pmi_p.add_argument("--out", required=True)
+    pmi_p.add_argument("--n_output", type=int, default=20)
 
     # User embedding
     ue_p = sub.add_parser("user_emb", help="User-embedding retrieval")
     ue_p.add_argument("--out", required=True)
+    ue_p.add_argument("--n_output", type=int, default=20)
     ue_p.add_argument("--user_emb_field", default=None,
                       help="Specific embedding field in the user-embeddings dataset")
 
     # Negative feedback
     nf_p = sub.add_parser("neg_feedback", help="Dense retrieval with negative feedback")
     nf_p.add_argument("--out", required=True)
+    nf_p.add_argument("--n_output", type=int, default=20)
     nf_p.add_argument("--embed", default="metadata-qwen3_embedding_0.6b",
                       choices=["audio-laion_clap", "image-siglip2", "cf-bpr",
                                "attributes-qwen3_embedding_0.6b",

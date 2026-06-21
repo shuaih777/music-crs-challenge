@@ -603,15 +603,16 @@ def run(args: argparse.Namespace) -> None:
 
             preds: List[str] = []
             seen = set(prior_track_ids) if not args.no_filter else set()
+            n_output = args.n_output
             for idx in ranked:
                 tid = track_ids[idx]
                 if tid in seen:
                     n_filtered += 1
                     continue
                 preds.append(tid)
-                if len(preds) == 20:
+                if len(preds) == n_output:
                     break
-            while len(preds) < 20:
+            while len(preds) < n_output:
                 preds.append(track_ids[int(np.random.randint(len(track_ids)))])
 
             top_meta = tracks_by_id.get(preds[0], {})
@@ -677,6 +678,10 @@ def parse_args() -> argparse.Namespace:
                    choices=["constant", "ascending", "descending", "zero_after"])
     p.add_argument("--dense_max_turn", type=int, default=4)
     p.add_argument("--topk_fuse", type=int, default=200)
+    p.add_argument("--n_output", type=int, default=20,
+                   help="Number of tracks to output per turn. Default 20 for "
+                        "submission; set to 100 when generating candidate pools "
+                        "for a downstream LTR reranker.")
     p.add_argument("--states_jsonl", default=None,
                    help="Optional extractor output JSONL. Combined with "
                         "--query_mode and --state_subtract_rejected.")
