@@ -256,7 +256,7 @@ def cmd_train(args) -> None:
         model=model,
         args=training_args,
         train_dataset=ds,
-        tokenizer=tok,
+        processing_class=tok,
     )
 
     print("Training...", flush=True)
