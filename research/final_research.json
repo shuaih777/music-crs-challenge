@@ -1,0 +1,145 @@
+{
+  "ranked_experiments": [
+    {
+      "rank": 1,
+      "name": "Bi-Encoder Fine-tuning (Conversation->Track) as New Retrieval Leg",
+      "category": "bi_encoder",
+      "rationale": "Gold-in-pool is only 40.5% — the HARD CEILING for any reranking improvement. A domain-fine-tuned bi-encoder trained on 120k (conversation_text, gold_track_text) pairs should lift recall@100 from 40.5% to 55-65%. This is the single highest-ROI experiment because it directly attacks the binding constraint. Training takes only 15-45 minutes on A100 with sentence-transformers MNR loss. The new leg feeds into existing LightGBM reranker for compounding gains. TalkPlay paper confirms metadata text embeddings + CF are the top-2 signals.",
+      "implementation": "1. Format 15,199 sessions x 8 turns = ~120k (conversation_text, track_metadata_text) pairs. conversation_text = 'User: {t1}\\nAssistant: {rec1}\\n...\\nUser: {current}'. track_text = '{title} by {artist} from {album} {tags} {year}' (NO lyrics per TalkPlay ablation). 2. Load BAAI/bge-base-en-v1.5 (110M params, 768d) via sentence-transformers. 3. Train with MultipleNegativesRankingLoss, batch_size=256, lr=2e-5, bf16, 2-3 epochs (~20 min on A100). 4. Hard negative mining stage 2: encode 47k tracks, mine top-50 non-gold neighbors, retrain 1 epoch at lr=1e-5 (~15 min). 5. Encode all 47k tracks (2-3 min). 6. Inference: encode each conversation, cosine sim top-100. 7. Add as new leg in LightGBM pool alongside existing 8 legs.",
+      "gpu_requirements": "1x A100 80GB (or H100). Training: 20-45 min total. Encoding 47k tracks: 3 min. Inference on 8k turns: <1 min.",
+      "expected_ndcg_lift": "+0.015-0.035 (via lifting gold-in-pool from 40.5% to 55-65%, then LightGBM exploits the larger recall)",
+      "effort_days": 1.5,
+      "risk_level": "low",
+      "source": "Bi-Encoder Training for Conversational Music Recommendation synthesis; ConvDR SIGIR 2021; sentence-transformers MNR loss documentation"
+    },
+    {
+      "rank": 2,
+      "name": "Listwise LLM Reranker (RankGPT-style) on Top-20 Candidates",
+      "category": "listwise_reranker",
+      "rationale": "Our cross-encoder FAILED twice because pointwise scoring cannot distinguish similar tracks. Listwise reranking fundamentally solves this by comparing ALL 20 candidates simultaneously in one prompt, leveraging the LLM's semantic understanding of conversation context + track metadata. 20 items fit easily in a single pass (~1700 tokens). Zero-shot with Qwen3-8B should already beat LightGBM on turns where the conversation context is informative. Fine-tuning on our data (we know the gold track position) makes this even stronger. This directly addresses the cross-encoder failure mode.",
+      "implementation": "1. ZERO-SHOT BASELINE (Day 1): Format prompt: System='You are a music recommendation expert...', User='{conversation}\\n\\nCandidate tracks:\\n[1] {title} by {artist} ({album}, {year}) [Tags: {tags}]\\n...\\n[20] ...\\nRank ALL 20 from most to least relevant.' Parse output with regex r'\\[(\\d+)\\]'. Run Qwen3-8B via vLLM on 8000 turns with temperature=0 (~2-4 hours on H100). 2. FINE-TUNED (Day 2-3): Generate training data from 15k train sessions — for each turn, take LightGBM top-20 candidates, create ideal permutation (gold first, rest by LightGBM score). LoRA fine-tune Qwen3-1.5B (r=16, alpha=32, lr=2e-5, 2 epochs, batch_size=4, grad_accum=8, max_seq_len=2048). Train ~2-3h on H100. 3. Constrained decoding with regex pattern to ensure valid output. 4. Combine listwise scores with LightGBM via simple weighted average.",
+      "gpu_requirements": "Zero-shot: 1x H100, ~2-4h inference (8000 turns x ~1s each). Fine-tuning: 1x H100, ~2-3h training + 1-2h inference. Can run in parallel with Experiment #1.",
+      "expected_ndcg_lift": "+0.010-0.025 on top of current LightGBM (concentrated on turns 2-8 where conversational semantics matter)",
+      "effort_days": 2.5,
+      "risk_level": "medium",
+      "source": "RankGPT (Sun et al. 2023), RankZephyr distillation, TalkPlay-Tools inference approach"
+    },
+    {
+      "rank": 3,
+      "name": "Item2Vec (Word2Vec on Playlist Co-occurrence) Retrieval Leg",
+      "category": "other",
+      "rationale": "TalkPlay paper proves playlist co-occurrence is THE most important signal (lambda_cf=25, 25x more important than audio). Our PMI leg already uses co-occurrence but is limited to binary co-occurrence in the challenge playlists. Item2Vec learns dense 128d embeddings from playlist sequences, capturing transitive similarity (A appears with B, B with C, so A is related to C). OTTO competition confirms Word2Vec on session sequences adds 5-10% unique recall over co-visitation matrices. Training is CPU-only, <1 hour.",
+      "implementation": "1. Load training set playlists (15,199 sessions, each with ordered track sequences from accepted music turns). 2. Train gensim Word2Vec (Skip-gram, dim=128, window=5, min_count=1, sg=1, epochs=20) treating each session's accepted track sequence as a sentence. 3. For cold-start tracks (not in training), use metadata fallback (BM25). 4. At inference: for each session/turn, average Word2Vec embeddings of prior accepted tracks, find top-100 nearest tracks via FAISS. 5. Add as new retrieval leg to LightGBM pool. 6. Expected: strong at turns 2-8 (like cf_bpr but with richer transitivity). Training: <30 min CPU. Index building: <5 min.",
+      "gpu_requirements": "None (CPU only). gensim Word2Vec trains in <30 min on 15k sessions.",
+      "expected_ndcg_lift": "+0.008-0.018 (complementary to existing cf_bpr which uses global BPR, this captures local session co-occurrence patterns)",
+      "effort_days": 0.5,
+      "risk_level": "low",
+      "source": "TalkPlay lambda_cf=25 finding; OTTO competition Word2Vec technique; item2vec paper"
+    },
+    {
+      "rank": 4,
+      "name": "LightGBM Feature Engineering Expansion (30+ new features)",
+      "category": "lgbm_tuning",
+      "rationale": "Current LightGBM uses only 12 trees (early stopping) with ~20 features. This suggests features are too weak to discriminate. OTTO top solutions used 100+ features and 150 trees. News recommendation paper showed temporal/rank-based features dominate. Adding cross-modal cosine similarities, tag-overlap counts, artist-match indicators, release-year proximity, and rank-within-current-pool features should give LightGBM much more signal, allowing deeper trees and better discrimination.",
+      "implementation": "1. Add per-candidate features: (a) cosine(conversation_embedding, track_embedding) for metadata_qwen3 and cf_bpr modalities, (b) artist_in_prior_accepts (binary), (c) genre_overlap_count with prior accepted tracks, (d) tag_overlap_count with user query keywords, (e) release_year - mean(prior_track_years), (f) popularity_rank_in_pool (relative rank among current 100 candidates), (g) n_legs_containing / total_legs ratio, (h) max_score_across_legs, (i) score_variance_across_legs. 2. Increase num_boost_round to 500, early_stopping to 50. 3. Add CatBoost as second ranker, average scores (OTTO: CatBoost > XGBoost). 4. Optuna sweep of num_leaves (31-127), min_data_in_leaf (5-50), feature_fraction (0.5-0.9) over 50 trials.",
+      "gpu_requirements": "None (CPU only). Feature engineering + training: ~30 min. Optuna sweep: ~2 hours.",
+      "expected_ndcg_lift": "+0.005-0.015 (from better feature utilization and hyperparameter optimization)",
+      "effort_days": 1,
+      "risk_level": "low",
+      "source": "OTTO competition feature engineering; News Recommendation ensemble paper (temporal/rank features); current 12-tree early stopping indicating feature poverty"
+    },
+    {
+      "rank": 5,
+      "name": "Simplified TalkPlay Generative Retrieval (K-Means Semantic IDs + Qwen3-0.6B)",
+      "category": "generative",
+      "rationale": "TalkPlay achieves Hit@100=0.288 on 400k tracks. With our 47k tracks, codebook utilization is 8x better (~46 tracks/cluster vs ~390). This is the organizers' own approach and likely what they optimized the evaluation for. The key advantage: it handles multi-turn context NATIVELY through autoregressive generation (no explicit history pooling needed). Two modalities (metadata_qwen3 + cf_bpr) with K=512 clusters give 512^2 = 262k possible IDs for 47k tracks. Risk: tight timeline (3 days) and novel code path.",
+      "implementation": "Day 1: (a) Run sklearn KMeans(n_clusters=512) on metadata_qwen3 embeddings (47k x 1024d) and cf_bpr (47k x 128d) — <5 min on CPU. (b) Assign 2-token semantic IDs to all tracks: <meta-X><cf-Y>. (c) Format 15k training conversations: replace track_ids with <start_music><meta-X><cf-Y><end_music>. Day 2: (a) Expand Qwen3-0.6B tokenizer by 1026 tokens (512*2 + 2 special). (b) Initialize new embeddings from N(mu, sigma) of existing embeddings. (c) LoRA fine-tune (rank=64, lr=1e-4, batch=32, 1 epoch) — ~45-60 min on H100. Day 3: (a) Implement inference: generate music tokens autoregressively. (b) Build inverted index for weighted overlap retrieval: score = 4*(cf_match) + 1*(meta_match). (c) Evaluate on devset and tune K/weights. Fallback: use as retrieval leg in ensemble if standalone performance is insufficient.",
+      "gpu_requirements": "1x H100 for LoRA fine-tuning (~60 min) + inference (~15 min). K-Means is CPU.",
+      "expected_ndcg_lift": "+0.015-0.040 (as standalone or +0.010-0.020 as additional retrieval leg in ensemble)",
+      "effort_days": 3,
+      "risk_level": "high",
+      "source": "TalkPlay paper (arXiv 2502.13713): K=1024 clusters, lambda_cf=25 > lambda_meta=9; MRR=0.049 on 400k tracks"
+    },
+    {
+      "rank": 6,
+      "name": "Current-Utterance-Only Retrieval Leg (Turn 5-8 Fix)",
+      "category": "other",
+      "rationale": "Per-turn analysis shows nDCG collapses from 0.17 (t2) to 0.09 (t7-8). The main cause: full history concatenation drowns the current user intent at later turns. A retrieval leg using ONLY the current user utterance ('something more upbeat' or 'how about jazz?') would directly capture what the user wants NOW without noise from earlier turns. This is free (uses existing embeddings, no training) and specifically targets the 30-50% gap on turns 5-8.",
+      "implementation": "1. For each (session, turn), extract only the current user message (not full history). 2. Encode with Qwen3-Embedding-0.6B (same model as metadata track embeddings for space alignment). 3. Compute cosine similarity against all 47k track metadata embeddings. 4. Return top-100 as a new retrieval leg. 5. Add pushback detection regex: if current utterance matches ('not', 'different', 'something else', 'too'), subtract 0.5 * embedding(last_recommended_track) from the query. 6. Feed as new leg into LightGBM. Expected to be the strongest leg for turns 5-8.",
+      "gpu_requirements": "1x GPU for encoding 8000 utterances with Qwen3-Embedding (~5 min). Can run on CPU in ~20 min.",
+      "expected_ndcg_lift": "+0.005-0.012 overall (+0.015-0.030 specifically on turns 5-8)",
+      "effort_days": 0.5,
+      "risk_level": "low",
+      "source": "Research synthesis #2; ConvDR insight about current-turn importance; per-turn analysis showing t5-8 collapse"
+    },
+    {
+      "rank": 7,
+      "name": "LightGBM + CatBoost Stacking Ensemble",
+      "category": "ensemble",
+      "rationale": "News recommendation paper showed 3-stage ensemble (base models -> stacking -> averaging) gained +1.6 AUC over best single model. We currently use only LightGBM. Adding CatBoost (which outperformed XGBoost in OTTO) as a second ranker, then training a Stage-2 LightGBM stacker on their combined predictions, should extract complementary patterns. CatBoost handles categorical features natively (leg membership, turn bucket) which LightGBM struggles with.",
+      "implementation": "1. Train CatBoost with same features as LightGBM (objective=YetiRank or PairLogit, iterations=1000, lr=0.1, early_stopping=50). 2. Generate OOF predictions from both LightGBM and CatBoost via 5-fold CV. 3. Stage 2: Train a new LightGBM (LambdaRank) using LightGBM_score and CatBoost_score as features (plus raw features). 4. Optuna-optimize blend weights: final_score = w1*lgbm + w2*catboost + w3*stacker. 5. Alternative simple approach: RRF of LightGBM and CatBoost rankings (no training needed for Stage 2).",
+      "gpu_requirements": "None (CPU only). CatBoost training: ~10-20 min. Stacking: ~10 min.",
+      "expected_ndcg_lift": "+0.003-0.008",
+      "effort_days": 0.5,
+      "risk_level": "low",
+      "source": "News Recommendation Ensemble paper (AUC 0.8924); OTTO competition (CatBoost > XGBoost finding)"
+    },
+    {
+      "rank": 8,
+      "name": "Response Quality Improvement (Metadata-Grounded Generation)",
+      "category": "response_quality",
+      "rationale": "The challenge uses Gemini LLM-as-a-Judge for response quality scoring. Current Distinct-2 = 0.265 is mediocre. TalkPlay-Tools paper shows that grounding responses in track metadata (title, artist, tags, mood) and using chain-of-thought reasoning about why the track matches improves both fluency and informativeness. This is orthogonal to retrieval quality and could boost the final composite score.",
+      "implementation": "1. Redesign response generation prompt: include full metadata of top-1 recommended track (title, artist, album, year, tags, mood). 2. Instruct LLM to: (a) acknowledge the user's preference, (b) explain WHY this specific track matches (cite genre, mood, artist similarity), (c) highlight one interesting fact about the track, (d) invite further exploration. 3. Use Qwen3-4B (better language quality than 0.6B) with temperature=0.7, top_p=0.9. 4. Add diversity by varying response templates per turn (first recommendation vs follow-up vs pivot). 5. Measure Distinct-2 and run self-evaluation with a judge prompt to estimate quality improvement.",
+      "gpu_requirements": "1x GPU for Qwen3-4B inference (~30-45 min for 8000 responses).",
+      "expected_ndcg_lift": "+0.000 nDCG (response quality is scored separately) but +0.05-0.15 on the Gemini judge score component",
+      "effort_days": 0.5,
+      "risk_level": "low",
+      "source": "TalkPlay-Tools response generation with metadata grounding; challenge scoring includes Gemini LLM-as-a-Judge"
+    },
+    {
+      "rank": 9,
+      "name": "GCRS-Style Semantic ID with Constrained Beam Search",
+      "category": "generative",
+      "rationale": "GCRS achieves R@1=+29% over baselines by combining RQ-VAE semantic IDs with structured generation (MODE tokens + constrained decoding). The constrained beam search over a trie of valid semantic IDs guarantees 100% valid recommendations (no hallucination). This is more principled than K-means (TalkPlay) because RQ-VAE learns hierarchical structure where similar items share prefix codes. However, it requires more engineering (trie construction, custom beam search) and is risky under time pressure.",
+      "implementation": "1. Install vector-quantize-pytorch. Train ResidualVQ(dim=1024, num_quantizers=4, codebook_size=64) on metadata_qwen3 embeddings — ~15-30 min on GPU. 2. Extract 4-tuple semantic IDs for all 47k tracks. Verify uniqueness (64^4 = 16.7M capacity >> 47k). 3. Build trie of valid 4-token sequences for constrained decoding. 4. Add MODE tokens (<REC>, <CHAT>) + control tokens (<BOI>, <EOI>, <RESP>) to Qwen3-0.6B/4B tokenizer. 5. Format training data as: context -> <MODE=REC><BOI>{sid_1}{sid_2}{sid_3}{sid_4}<EOI><RESP>{response}. 6. QLoRA fine-tune (rank=16, freeze original embeddings, train only new token embeddings + LoRA weights). 7. Constrained beam search at inference (beam=50) to produce ranked list.",
+      "gpu_requirements": "1x H100: RQ-VAE training (~30 min), QLoRA fine-tune (~2-3h for 7B, ~45 min for 0.6B), inference with constrained decoding (~30 min).",
+      "expected_ndcg_lift": "+0.020-0.050 (high variance — could be transformative or could fail to converge in time)",
+      "effort_days": 4,
+      "risk_level": "high",
+      "source": "GCRS paper (Qwen2.5-7B-Instruct, R@1 +29%); RQ-VAE from TIGER; TalkPlay-Tools RVQ architecture"
+    },
+    {
+      "rank": 10,
+      "name": "Session-Level Collaborative Filtering Leg (KMeans Cluster Popular Items)",
+      "category": "other",
+      "rationale": "OTTO top solutions used session-level clustering: average Word2Vec embeddings of session items, KMeans cluster (~50 clusters), then popular items within each cluster become candidates. This captures a collaborative filtering signal at the session level rather than item level. For our Music-CRS, conversations with similar preference evolution should share gold tracks. This is simple to implement and adds diversity to the retrieval pool.",
+      "implementation": "1. For each training session, compute session embedding = weighted average of all accepted tracks' cf_bpr embeddings (weight by recency: alpha^(T-t)). 2. Run KMeans(n_clusters=50) on all training session embeddings. 3. For each cluster, compute popularity ranking of all gold tracks that appeared in that cluster's sessions. 4. At inference: compute current session embedding, find nearest cluster, return top-100 popular tracks from that cluster (excluding already-recommended). 5. Add as retrieval leg to LightGBM. Expected to help cold-start turns (turn 1) and long-tail preference patterns.",
+      "gpu_requirements": "None (CPU only). KMeans on 15k x 128d: <1 min. Inference: <1 min.",
+      "expected_ndcg_lift": "+0.003-0.008 (complementary signal, primarily helps turn 1 where individual-track retrieval is weakest)",
+      "effort_days": 0.5,
+      "risk_level": "low",
+      "source": "OTTO competition Session Embedding + KMeans technique; collaborative filtering at session level"
+    }
+  ],
+  "critical_insights_from_papers": [
+    "GOLD-IN-POOL IS THE BINDING CONSTRAINT: At 40.5% gold-in-pool (top-100), no reranker can push nDCG@20 above ~0.19 theoretical max. Every experiment that does NOT increase recall is bounded by this ceiling. Priority #1 must be new retrieval legs.",
+    "PLAYLIST CO-OCCURRENCE >>> EVERYTHING ELSE: TalkPlay's ablation proves lambda_cf=25 (co-occurrence) vs lambda_audio=1. Our PMI leg captures this but a learned Item2Vec on session sequences should be much stronger (transitive similarity). Audio features ACTIVELY HURT (-0.0036 MRR when included).",
+    "POINTWISE CROSS-ENCODERS CANNOT DISTINGUISH SIMILAR TRACKS: Our two cross-encoder experiments confirm this. When the top-20 candidates all share the same genre/artist/era, scoring each independently gives near-identical scores. LISTWISE reranking (comparing all 20 simultaneously) is the correct paradigm — it sees relative differences the pointwise model misses.",
+    "LYRICS HURT TEXT RETRIEVAL: TalkPlay paper explicitly states lyrics DEGRADE performance when included in text representations. Item text should be '{Title} by {Artist} from {Album} {Semantic tags} {Year}' ONLY. This validates our existing approach of not using lyrics in BM25 queries.",
+    "TURN 5-8 COLLAPSE IS A QUERY FORMULATION PROBLEM, NOT RETRIEVAL: Full conversation concatenation drowns current intent. TalkPlay solves this via autoregressive generation (model implicitly learns recency weighting). For classical retrieval, current-utterance-only leg or learned state extraction are the fixes.",
+    "GENERATIVE RETRIEVAL WITH SEMANTIC IDs IS THE ORGANIZERS' OWN APPROACH: Both TalkPlay and TalkPlay-Tools use K-means/RQ-VAE semantic IDs. The evaluation dataset was likely designed with this approach in mind. Aligning to their representation space (NV-Embed-v2, item2vec) gives structural advantage.",
+    "SMALL MODELS (0.6B-1B) CAN DO LISTWISE RERANKING IF FINE-TUNED ON PERMUTATION DATA: RankZephyr shows 7B matches GPT-4 after fine-tuning on 100K listwise examples. Our Qwen3-0.6B/1.5B can likely learn music-specific listwise reranking from our 15K sessions with gold labels — we just need the RIGHT training format (permutation output, not pointwise score).",
+    "TWO-STAGE ENSEMBLE (RETRIEVAL + LEARNED RERANKING) IS THE UNIVERSAL WINNING PATTERN: Every top competition solution (OTTO, News Rec, RecSys 2024) uses candidate-generation -> learned-reranking. Our LightGBM already does this but with too few features (12 trees = feature poverty). Expanding to 50+ features should unlock deeper trees."
+  ],
+  "what_NOT_to_do": [
+    "DO NOT train another pointwise cross-encoder (Qwen3-0.6B or Qwen3-Reranker). Failed TWICE because top-20 tracks are too similar for independent scoring to distinguish. The model assigns near-identical scores to all candidates in the same genre/era.",
+    "DO NOT include lyrics in text representations for BM25 or dense retrieval. TalkPlay ablation explicitly shows lyrics DEGRADE performance. Our lyrics-qwen3 leg should be deprioritized or dropped from the LightGBM pool.",
+    "DO NOT apply Unicode tokenizer 'fixes' that change the BM25 tokenizer without also re-indexing the corpus. Our experiment confirmed -2.5% when query tokenizer diverges from index tokenizer. The BM25 corpus and query MUST use the same tokenizer.",
+    "DO NOT invest in audio embedding features (LAION-CLAP, MusicFM). TalkPlay proves audio features actively HURT MRR (-0.0036). Low-level acoustic similarity is noise in conversational recommendation where preferences are expressed in natural language. SigLIP2 (visual/album art) is the exception — it works because album art encodes genre/mood semantics.",
+    "DO NOT try Meta HSTU/Generative Recommenders. Requires fbgemm_gpu, torchrec, custom Triton kernels, designed for billion-scale sequential interaction data (not 47k tracks with dialogue). Would take >1 week just to adapt the data pipeline.",
+    "DO NOT attempt full GCRS implementation from scratch — the GitHub repo is empty/unavailable. Use TalkPlay's simpler K-means approach instead which is better documented and music-specific.",
+    "DO NOT use equal-weight RRF without sweeping weights. Our 3-way RRF (meta+cf+CLAP) LOST to 2-way because equal weights diluted the stronger signals. Always grid-search or Optuna-optimize per-leg weights.",
+    "DO NOT fine-tune with full embedding layer unfrozen (QLoRA insight from GCRS). The paper shows full embedding fine-tuning HURTS because it destroys pretrained semantic structure. Freeze original embeddings; only train NEW token embeddings + LoRA weights.",
+    "DO NOT generate responses BEFORE retrieval. TalkPlay paper shows generating music tokens BEFORE text response prevents popularity bias. Our pipeline correctly does retrieval-first, response-second — do not reverse this."
+  ]
+}
