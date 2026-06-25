@@ -134,11 +134,17 @@ def build_features(
             feats = []
 
             # Per-leg rank features
+            ranks_this_candidate = []
+            scores_this_candidate = []
             for lname in leg_names:
                 rank_dict = leg_ranks[lname].get(key, {})
                 rank = rank_dict.get(tid, -1)
                 feats.append(rank if rank >= 0 else top_k + 1)  # rank (lower = better)
-                feats.append(1.0 / (60 + rank + 1) if rank >= 0 else 0.0)  # RRF-style score
+                score_val = 1.0 / (60 + rank + 1) if rank >= 0 else 0.0
+                feats.append(score_val)  # RRF-style score
+                if rank >= 0:
+                    ranks_this_candidate.append(rank)
+                    scores_this_candidate.append(score_val)
 
             # Track metadata features
             meta = track_meta.get(tid, {})
@@ -168,6 +174,54 @@ def build_features(
             )
             feats.append(float(n_legs_in))
 
+            # --- New features ---
+
+            # rank_std: standard deviation of ranks across legs (disagreement)
+            if ranks_this_candidate:
+                feats.append(float(np.std(ranks_this_candidate)))
+            else:
+                feats.append(0.0)
+
+            # best_rank: minimum rank across legs (best single-leg position)
+            if ranks_this_candidate:
+                feats.append(float(min(ranks_this_candidate)))
+            else:
+                feats.append(float(top_k + 1))
+
+            # worst_rank: maximum rank across legs
+            if ranks_this_candidate:
+                feats.append(float(max(ranks_this_candidate)))
+            else:
+                feats.append(float(top_k + 1))
+
+            # reciprocal_rank_sum: sum of 1/(60+rank) for all containing legs
+            rr_sum = sum(1.0 / (60 + r) for r in ranks_this_candidate)
+            feats.append(float(rr_sum))
+
+            # score_ratio: max_score / second_max_score (dominance of best leg)
+            if len(scores_this_candidate) >= 2:
+                sorted_scores = sorted(scores_this_candidate, reverse=True)
+                feats.append(sorted_scores[0] / max(sorted_scores[1], 1e-9))
+            elif len(scores_this_candidate) == 1:
+                feats.append(1.0)
+            else:
+                feats.append(0.0)
+
+            # n_legs_ratio: n_legs_containing / total_n_legs
+            feats.append(float(n_legs_in) / max(n_legs, 1))
+
+            # cf_boosted_score: score_cf_bpr * 2.5
+            # (TalkPlay paper finding: CF is 2.5x more important)
+            cf_score = 0.0
+            for lname in leg_names:
+                if "cf" in lname.lower():
+                    rank_dict = leg_ranks[lname].get(key, {})
+                    rank = rank_dict.get(tid, -1)
+                    if rank >= 0:
+                        cf_score = 1.0 / (60 + rank + 1)
+                    break
+            feats.append(cf_score * 2.5)
+
             all_features.append(feats)
 
         all_keys.append(key)
@@ -180,6 +234,9 @@ def build_features(
     feature_names.extend([
         "popularity", "turn_number", "n_prior_accepts",
         "pmi_sum", "is_in_all_legs", "n_legs_containing",
+        "rank_std", "best_rank", "worst_rank",
+        "reciprocal_rank_sum", "score_ratio", "n_legs_ratio",
+        "cf_boosted_score",
     ])
 
     X = np.array(all_features, dtype=np.float32)
@@ -208,15 +265,18 @@ def train_and_predict(
         "objective": "lambdarank",
         "metric": "ndcg",
         "lambdarank_truncation_level": 20,
-        "num_leaves": 63,
-        "learning_rate": 0.05,
-        "min_data_in_leaf": 10,
-        "feature_fraction": 0.8,
+        "num_leaves": 31,
+        "learning_rate": 0.02,
+        "min_data_in_leaf": 30,
+        "feature_fraction": 0.7,
         "bagging_fraction": 0.8,
         "bagging_freq": 5,
+        "lambda_l1": 0.1,
+        "lambda_l2": 1.0,
         "verbose": -1,
         "n_jobs": -1,
     }
+    # num_boost_round=500, early_stopping=50
 
     # Build group boundaries
     group_boundaries = np.cumsum([0] + groups)
@@ -258,9 +318,9 @@ def train_and_predict(
         model = lgb.train(
             params,
             train_ds,
-            num_boost_round=300,
+            num_boost_round=500,
             valid_sets=[val_ds],
-            callbacks=[lgb.early_stopping(20, verbose=True),
+            callbacks=[lgb.early_stopping(50, verbose=True),
                        lgb.log_evaluation(50)],
         )
         models.append(model)
