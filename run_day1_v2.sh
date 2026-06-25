@@ -86,16 +86,15 @@ echo "" | tee -a "$LOG"
 echo "====== Step 3: LightGBM (all legs) ======" | tee -a "$LOG"
 
 # Gather all available top-100 legs
-# Existing legs from run_expand_top100.sh:
-#   meta_v2_top100, cf_v2_top100, pmi_v2_top100, attr_v2_top100,
-#   bm25_v2_top100, last_v2_top100, siglip_v2_top100
-# New legs:
-#   item2vec_top100, current_utterance_top100
+# Use the ACTUAL leg filenames that exist from previous runs:
+#   metadata_qwen3, cf_bpr, pmi_leg, decay_descending, bm25_norepeat (original names)
+#   + new legs: item2vec_top100, current_utterance_top100
 
 # Build comma-separated leg list from what actually exists
 ALL_LEGS=""
-for LEG in meta_v2_top100 cf_v2_top100 pmi_v2_top100 attr_v2_top100 \
-           bm25_v2_top100 last_v2_top100 siglip_v2_top100 \
+for LEG in metadata_qwen3 cf_bpr pmi_leg decay_descending bm25_norepeat \
+           leg_attributes_qwen3_embedding_0_6b leg_lyrics_qwen3_embedding_0_6b \
+           leg_image_siglip2 state_bm25_focused \
            item2vec_top100 current_utterance_top100; do
     if [ -f "exp/inference/devset/${LEG}.json" ]; then
         if [ -z "$ALL_LEGS" ]; then
