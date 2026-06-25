@@ -141,5 +141,48 @@
     "DO NOT use equal-weight RRF without sweeping weights. Our 3-way RRF (meta+cf+CLAP) LOST to 2-way because equal weights diluted the stronger signals. Always grid-search or Optuna-optimize per-leg weights.",
     "DO NOT fine-tune with full embedding layer unfrozen (QLoRA insight from GCRS). The paper shows full embedding fine-tuning HURTS because it destroys pretrained semantic structure. Freeze original embeddings; only train NEW token embeddings + LoRA weights.",
     "DO NOT generate responses BEFORE retrieval. TalkPlay paper shows generating music tokens BEFORE text response prevents popularity bias. Our pipeline correctly does retrieval-first, response-second — do not reverse this."
-  ]
+  ],
+  "workflow_transcripts": {
+    "base_dir": "/home/l131341/.claude/projects/-home-l131341-projects-llm-llm-rec/a0b0809a-eadc-4577-b24f-56e31d489bbb/subagents/workflows/wf_d6d752cc-9b8/",
+    "agents": [
+      {
+        "file": "agent-a04029459f0034239.jsonl",
+        "size_kb": 165
+      },
+      {
+        "file": "agent-a2c7c524f6aaa76a8.jsonl",
+        "size_kb": 1929
+      },
+      {
+        "file": "agent-a50d0a59957a2c74d.jsonl",
+        "size_kb": 208
+      },
+      {
+        "file": "agent-a670534a4bc9c32da.jsonl",
+        "size_kb": 280
+      },
+      {
+        "file": "agent-a7d0e4ddfc69fd28a.jsonl",
+        "size_kb": 5688
+      },
+      {
+        "file": "agent-ab646a442c205306b.jsonl",
+        "size_kb": 152
+      },
+      {
+        "file": "agent-ace51049253a5f31b.jsonl",
+        "size_kb": 3634
+      },
+      {
+        "file": "agent-ae5fba42d1d9994b8.jsonl",
+        "size_kb": 3390
+      },
+      {
+        "file": "agent-aff1d0cc3aedf602f.jsonl",
+        "size_kb": 1389
+      }
+    ],
+    "journal": "journal.jsonl",
+    "note": "JSONL format (one JSON event per line). Each agent file contains the full conversation transcript including tool calls, paper readings, and WebFetch results."
+  }
 }
