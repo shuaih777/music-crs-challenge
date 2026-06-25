@@ -56,13 +56,8 @@ else
         2>&1 | tee -a "$LOG"
 fi
 
-# Evaluate standalone
-echo "  [eval] Item2Vec standalone:" | tee -a "$LOG"
-PYTHONPATH=src python src/evaluate.py \
-    --inference "$ITEM2VEC_OUT" \
-    --scores exp/scores/devset/item2vec_top100.json \
-    --ground_truth exp/ground_truth/devset.json \
-    2>&1 | grep -E "ndcg@20|hit@20" | tee -a "$LOG"
+# (top-100 legs are for LightGBM pool, not direct evaluation)
+echo "  [done] Item2Vec leg: $ITEM2VEC_OUT" | tee -a "$LOG"
 
 # =============================================================================
 # Step 2: Current-utterance BM25 leg
@@ -81,13 +76,8 @@ else
         2>&1 | tee -a "$LOG"
 fi
 
-# Evaluate standalone
-echo "  [eval] Current-utterance standalone:" | tee -a "$LOG"
-PYTHONPATH=src python src/evaluate.py \
-    --inference "$CUR_UTT_OUT" \
-    --scores exp/scores/devset/current_utterance_top100.json \
-    --ground_truth exp/ground_truth/devset.json \
-    2>&1 | grep -E "ndcg@20|hit@20" | tee -a "$LOG"
+# (top-100 legs are for LightGBM pool, not direct evaluation)
+echo "  [done] Current-utterance leg: $CUR_UTT_OUT" | tee -a "$LOG"
 
 # =============================================================================
 # Step 3: LightGBM with ALL legs (existing top-100 + new legs)
