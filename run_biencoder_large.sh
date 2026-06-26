@@ -23,6 +23,7 @@ conda activate foundation_model 2>/dev/null || true
 export PATH="${CONDA_PREFIX:-$HOME/.conda/envs/foundation_model}/bin:$PATH"
 export LD_LIBRARY_PATH="${CONDA_PREFIX:-}/lib:${LD_LIBRARY_PATH:-}"
 module unload cuda 2>/dev/null || true
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 LOG="logs/biencoder_large.log"
 mkdir -p logs out/biencoder_large exp/inference/devset exp/scores/devset exp/ltr
@@ -45,7 +46,7 @@ else
         --model_id BAAI/bge-large-en-v1.5 \
         --output_dir out/biencoder_large \
         --out_leg "$BIENC_LARGE" \
-        --batch_size 128 \
+        --batch_size 64 \
         --epochs 3 \
         --n_output 100 \
         2>&1 | tee -a "$LOG"
