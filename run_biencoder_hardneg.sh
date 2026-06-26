@@ -157,7 +157,7 @@ with open('$HARD_NEG_DATA') as f:
 print(f'  {len(examples)} triplets', flush=True)
 
 # Use TripletLoss with hard negatives
-train_dataloader = DataLoader(examples, shuffle=True, batch_size=128)
+train_dataloader = DataLoader(examples, shuffle=True, batch_size=64)
 train_loss = losses.TripletLoss(model, distance_metric=losses.TripletDistanceMetric.COSINE,
                                  triplet_margin=0.2)
 
