@@ -8,13 +8,11 @@ tqdm==4.67.3
 huggingface_hub==0.26.2
 pyarrow==20.0.0
 pyarrow_hotfix==0.6
-omegaconf>=2.3
 multiprocess==0.70.17
 typing_extensions>=4.12
 
-# For GPU experiments only (don't install on CPU host):
-#   torch>=2.3
-#   transformers>=4.45
-#   sentence-transformers>=3.0
-#   accelerate>=0.30
-#   flash-attn  # optional, large speedup on H100/A100
+# LightGBM (CPU, for learned-to-rank reranker)
+lightgbm>=4.0
+
+# Gensim (CPU, for Item2Vec Word2Vec training)
+gensim>=4.3
