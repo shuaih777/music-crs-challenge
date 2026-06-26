@@ -59,7 +59,7 @@ else
         --model Qwen/Qwen3-8B \
         --top_k 20 \
         --temperature 0.0 \
-        --batch_size 1 \
+        --batch_size 8 \
         2>&1 | tee -a "$LOG"
 fi
 

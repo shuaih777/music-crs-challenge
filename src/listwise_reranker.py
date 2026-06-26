@@ -114,20 +114,20 @@ def parse_ranking(output: str, n_tracks: int) -> List[int]:
       - "[3] [7] [1] ..."
       - "1. Track 3\n2. Track 7\n..."
     """
-    # Extract all numbers from the output
     numbers = [int(x) for x in re.findall(r'\d+', output)]
 
-    # Filter to valid track indices (1-indexed in prompt)
     valid = []
-    seen = set()
+    seen_1idx = set()   # 1-indexed values from LLM output
+    seen_0idx = set()   # 0-indexed positions already in valid
     for n in numbers:
-        if 1 <= n <= n_tracks and n not in seen:
-            valid.append(n - 1)  # Convert to 0-indexed
-            seen.add(n)
+        if 1 <= n <= n_tracks and n not in seen_1idx:
+            valid.append(n - 1)
+            seen_1idx.add(n)
+            seen_0idx.add(n - 1)
 
-    # If we didn't get all tracks, append missing ones in original order
+    # Append any missing positions in original order
     for i in range(n_tracks):
-        if i not in seen:
+        if i not in seen_0idx:
             valid.append(i)
 
     return valid[:n_tracks]
@@ -188,31 +188,24 @@ def main() -> None:
     convo_ds = load_dataset("talkpl-ai/TalkPlayData-Challenge-Dataset", split="test")
     conversations = {ex["session_id"]: ex["conversations"] for ex in convo_ds}
 
-    # Process each turn
-    print(f"Reranking {len(rows)} turns (top-{args.top_k} each)...", flush=True)
-    output_rows = []
-    n_parsed_full = 0
-    n_parsed_partial = 0
-
-    for row in tqdm(rows, desc="listwise"):
+    # Pre-build all (row, candidates, prompt) tuples
+    print(f"Building prompts for {len(rows)} turns...", flush=True)
+    to_process: List[tuple] = []
+    for row in rows:
         session_id = row["session_id"]
         turn = int(row["turn_number"])
         candidates = row["predicted_track_ids"][:args.top_k]
 
         if not candidates or session_id not in conversations:
-            output_rows.append(row)
+            to_process.append((row, None, None))
             continue
 
-        # Build context
         context = build_conversation_context(conversations[session_id], turn)
-
-        # Build track descriptions
         track_descs = []
-        for i, tid in enumerate(candidates):
+        for j, tid in enumerate(candidates):
             meta = track_meta.get(tid, {})
-            track_descs.append(build_track_description(meta, i + 1))
+            track_descs.append(build_track_description(meta, j + 1))
 
-        # Build prompt
         user_content = build_ranking_prompt(context, track_descs)
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -226,9 +219,34 @@ def main() -> None:
             prompt = tok.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True)
 
-        # Generate
-        inputs = tok(prompt, return_tensors="pt", truncation=True,
-                     max_length=2048).to(device)
+        to_process.append((row, candidates, prompt))
+
+    # Process in batches
+    print(f"Reranking {len(rows)} turns (top-{args.top_k} each), batch_size={args.batch_size}...", flush=True)
+    output_rows = []
+    n_parsed_full = 0
+    n_parsed_partial = 0
+
+    n_batches = (len(to_process) + args.batch_size - 1) // args.batch_size
+    for batch_start in tqdm(range(0, len(to_process), args.batch_size),
+                            total=n_batches, desc="listwise"):
+        batch = to_process[batch_start: batch_start + args.batch_size]
+
+        # Split passthrough (no candidates) from real items
+        real_idx = [i for i, (_, cands, _) in enumerate(batch) if cands is not None]
+        for i, (row, cands, _) in enumerate(batch):
+            if cands is None:
+                output_rows.append(row)
+
+        if not real_idx:
+            continue
+
+        real_items = [batch[i] for i in real_idx]
+        prompts = [prompt for _, _, prompt in real_items]
+
+        # Tokenize with left-padding (tokenizer already set padding_side="left")
+        inputs = tok(prompts, return_tensors="pt", truncation=True,
+                     max_length=2048, padding=True).to(device)
         with torch.no_grad():
             out_ids = model.generate(
                 **inputs,
@@ -237,26 +255,25 @@ def main() -> None:
                 temperature=args.temperature if args.temperature > 0 else None,
                 pad_token_id=tok.pad_token_id,
             )
-        gen_text = tok.decode(out_ids[0][inputs["input_ids"].shape[1]:],
-                              skip_special_tokens=True)
 
-        # Parse ranking
-        ranking = parse_ranking(gen_text, len(candidates))
-        if len(set(ranking)) == len(candidates):
-            n_parsed_full += 1
-        else:
-            n_parsed_partial += 1
+        input_len = inputs["input_ids"].shape[1]
+        for k, (row, candidates, _) in enumerate(real_items):
+            gen_text = tok.decode(out_ids[k][input_len:], skip_special_tokens=True)
 
-        # Reorder candidates
-        reranked = [candidates[i] for i in ranking]
+            ranking = parse_ranking(gen_text, len(candidates))
+            if len(set(ranking)) == len(candidates):
+                n_parsed_full += 1
+            else:
+                n_parsed_partial += 1
 
-        output_rows.append({
-            "session_id": session_id,
-            "user_id": row.get("user_id", ""),
-            "turn_number": turn,
-            "predicted_track_ids": reranked,
-            "predicted_response": row.get("predicted_response", ""),
-        })
+            reranked = [candidates[i] for i in ranking]
+            output_rows.append({
+                "session_id": row["session_id"],
+                "user_id": row.get("user_id", ""),
+                "turn_number": int(row["turn_number"]),
+                "predicted_track_ids": reranked,
+                "predicted_response": row.get("predicted_response", ""),
+            })
 
     print(f"\nParsing: {n_parsed_full} full, {n_parsed_partial} partial "
           f"({n_parsed_full/(n_parsed_full+n_parsed_partial)*100:.1f}% clean)", flush=True)
