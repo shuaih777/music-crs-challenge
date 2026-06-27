@@ -255,11 +255,12 @@ def train_model(
             prompt = tok.apply_chat_template(msgs[:-1], tokenize=False,
                                              add_generation_prompt=True)
         prompt_ids = tok(prompt, truncation=True, max_length=max_seq_len)["input_ids"]
-        labels = list(out["input_ids"])
+        input_ids = list(out["input_ids"])
+        attention_mask = list(out["attention_mask"])
+        labels = list(input_ids)
         for i in range(min(len(prompt_ids), len(labels))):
             labels[i] = -100
-        out["labels"] = labels
-        return out
+        return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
 
     ds = ds.map(tokenize_fn, remove_columns=ds.column_names, desc="tokenize")
 
