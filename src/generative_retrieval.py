@@ -279,7 +279,7 @@ def train_model(
         remove_unused_columns=False,
     )
 
-    trainer = Trainer(model=model, args=training_args, train_dataset=ds, tokenizer=tok)
+    trainer = Trainer(model=model, args=training_args, train_dataset=ds, processing_class=tok)
     print("Training...", flush=True)
     trainer.train()
     trainer.save_model(output_dir)
