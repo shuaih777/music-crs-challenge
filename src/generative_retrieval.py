@@ -185,7 +185,7 @@ def train_model(
     try:
         import torch
         from datasets import Dataset
-        from transformers import (AutoTokenizer, AutoModelForCausalLM,
+        from transformers import (AutoTokenizer, AutoModelForCausalLM, DataCollatorForSeq2Seq,
                                   TrainingArguments, Trainer)
         from peft import LoraConfig, get_peft_model, TaskType
     except ImportError as e:
@@ -280,7 +280,8 @@ def train_model(
         remove_unused_columns=False,
     )
 
-    trainer = Trainer(model=model, args=training_args, train_dataset=ds, processing_class=tok)
+    data_collator = DataCollatorForSeq2Seq(tok, model=model, padding=True, pad_to_multiple_of=8, label_pad_token_id=-100)
+    trainer = Trainer(model=model, args=training_args, train_dataset=ds, processing_class=tok, data_collator=data_collator)
     print("Training...", flush=True)
     trainer.train()
     trainer.save_model(output_dir)
