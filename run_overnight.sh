@@ -36,15 +36,15 @@ echo "Plan: train 4 bi-encoders + final ablation" | tee -a "$LOG"
 # Models to train (each ~1-1.5h)
 # =============================================================================
 declare -A MODELS
-MODELS[gte_large]="Alibaba-NLP/gte-large-en-v1.5"
-MODELS[nomic]="nomic-ai/nomic-embed-text-v1.5"
-MODELS[gte_base]="thenlper/gte-base"
-MODELS[minilm]="sentence-transformers/all-MiniLM-L12-v2"
+MODELS[stella]="dunzhang/stella_en_400M_v5"
+MODELS[mxbai]="mixedbread-ai/mxbai-embed-large-v1"
+MODELS[arctic]="Snowflake/snowflake-arctic-embed-l-v2.0"
+MODELS[nv_embed]="nvidia/NV-Embed-v2"
 
 # =============================================================================
 # Train each bi-encoder
 # =============================================================================
-for KEY in gte_large nomic gte_base minilm; do
+for KEY in stella mxbai arctic nv_embed; do
     MODEL_ID="${MODELS[$KEY]}"
     OUT_DIR="out/biencoder_${KEY}"
     OUT_LEG="exp/inference/devset/biencoder_${KEY}_top100.json"
@@ -64,10 +64,10 @@ for KEY in gte_large nomic gte_base minilm; do
     # Determine batch size based on model size
     BATCH=256
     case "$KEY" in
-        gte_large) BATCH=128 ;;
-        nomic) BATCH=256 ;;
-        gte_base) BATCH=256 ;;
-        minilm) BATCH=512 ;;
+        stella) BATCH=128 ;;
+        mxbai) BATCH=128 ;;
+        arctic) BATCH=128 ;;
+        nv_embed) BATCH=32 ;;
     esac
 
     PYTHONPATH=src python src/train_biencoder.py all \
@@ -104,8 +104,8 @@ echo "============================================================" | tee -a "$L
 # Collect all available bi-encoder legs
 ALL_BIENC_LEGS=""
 for KEY in biencoder_large_top100 biencoder_top100 e5_large_top100 \
-           biencoder_gte_large_top100 biencoder_nomic_top100 \
-           biencoder_gte_base_top100 biencoder_minilm_top100; do
+           biencoder_stella_top100 biencoder_mxbai_top100 \
+           biencoder_arctic_top100 biencoder_nv_embed_top100; do
     if [ -f "exp/inference/devset/${KEY}.json" ]; then
         ALL_BIENC_LEGS="${ALL_BIENC_LEGS:+$ALL_BIENC_LEGS,}$KEY"
     fi
