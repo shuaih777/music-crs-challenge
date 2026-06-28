@@ -46,47 +46,6 @@ from datasets import load_dataset
 from tqdm import tqdm
 
 
-def _apply_transformers_compat_patches():
-    """Runtime patches for models written against older transformers (<5.x)."""
-    # 1. DynamicCache.from_legacy_cache was removed in transformers 5.x
-    try:
-        from transformers import DynamicCache
-        if not hasattr(DynamicCache, 'from_legacy_cache'):
-            @classmethod
-            def from_legacy_cache(cls, past_key_values=None):
-                cache = cls()
-                if past_key_values is not None:
-                    for layer_idx, (k, v) in enumerate(past_key_values):
-                        cache.update(k, v, layer_idx)
-                return cache
-            DynamicCache.from_legacy_cache = from_legacy_cache
-    except Exception:
-        pass
-
-    # 2. DynamicCache.get_usable_length renamed to get_seq_length in transformers 5.x
-    try:
-        from transformers import DynamicCache
-        if not hasattr(DynamicCache, 'get_usable_length') and hasattr(DynamicCache, 'get_seq_length'):
-            DynamicCache.get_usable_length = DynamicCache.get_seq_length
-    except Exception:
-        pass
-
-    # 3. all_tied_weights_keys: accessed as instance attr in transformers 5.x
-    #    but custom models (e.g. NVEmbedModel) may not initialize it
-    try:
-        import transformers.modeling_utils as _mu
-        _orig = _mu.PreTrainedModel._move_missing_keys_from_meta_to_device
-        def _patched(self, *args, **kwargs):
-            if not hasattr(self, 'all_tied_weights_keys'):
-                self.all_tied_weights_keys = {}
-            return _orig(self, *args, **kwargs)
-        _mu.PreTrainedModel._move_missing_keys_from_meta_to_device = _patched
-    except Exception:
-        pass
-
-
-_apply_transformers_compat_patches()
-
 
 # ============================================================================
 # Data preparation
@@ -194,6 +153,40 @@ def cmd_train(args) -> None:
 
     print(f"Loading model: {args.model_id}", flush=True)
     model = SentenceTransformer(args.model_id, trust_remote_code=True)
+
+    # NV-Embed: BidirectionalMistralModel.forward was written for an older transformers
+    # API where (a) decoder layers returned tuples and (b) RoPE was computed inside
+    # attention rather than passed in as position_embeddings. Both have changed in 4.45+.
+    # Fix: replace the forward entirely with a corrected version that keeps bidirectional
+    # masking (_prepare_4d_attention_mask) while using the current decoder layer API.
+    try:
+        import torch as _torch
+        from transformers import MistralModel as _MistralModel
+        from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask as _prep_mask
+        from transformers.modeling_outputs import BaseModelOutputWithPast as _BMOWithPast
+        _inner = getattr(model[0].auto_model, 'embedding_model', None)
+        if _inner is not None and isinstance(_inner, _MistralModel) and type(_inner) is not _MistralModel:
+            def _bidir_forward(self, input_ids=None, attention_mask=None, position_ids=None,
+                                past_key_values=None, inputs_embeds=None, **_kw):
+                if inputs_embeds is None:
+                    inputs_embeds = self.embed_tokens(input_ids)
+                _, seq_len = inputs_embeds.shape[:2]
+                if position_ids is None:
+                    position_ids = _torch.arange(seq_len, dtype=_torch.long,
+                                                 device=inputs_embeds.device).unsqueeze(0)
+                # bidirectional mask (not causal)
+                mask = _prep_mask(attention_mask, inputs_embeds.dtype) if attention_mask is not None else None
+                hidden_states = inputs_embeds
+                position_embeddings = self.rotary_emb(hidden_states, position_ids)
+                for layer in self.layers:
+                    hidden_states = layer(hidden_states, attention_mask=mask,
+                                         position_ids=position_ids,
+                                         position_embeddings=position_embeddings)
+                return _BMOWithPast(last_hidden_state=self.norm(hidden_states))
+            _inner.__class__.forward = _bidir_forward
+            print("  applied NV-Embed bidirectional forward fix", flush=True)
+    except Exception:
+        pass
 
     # Gradient checkpointing: trades compute for memory (~50-70% less activation memory)
     try:

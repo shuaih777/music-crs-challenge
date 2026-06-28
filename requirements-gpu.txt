@@ -2,8 +2,8 @@
 # Pick the torch wheel matching your CUDA version.
 
 torch>=2.3
-transformers>=4.45
-sentence-transformers>=3.0
+transformers>=4.45,<5.0
+sentence-transformers==3.3.1
 accelerate>=0.30
 peft>=0.12
 einops

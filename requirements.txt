@@ -8,7 +8,7 @@ tqdm==4.67.3
 huggingface_hub==0.26.2
 pyarrow==20.0.0
 pyarrow_hotfix==0.6
-multiprocess==0.70.17
+multiprocess==0.70.16
 typing_extensions>=4.12
 
 # LightGBM (CPU, for learned-to-rank reranker)
