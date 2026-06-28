@@ -29,6 +29,9 @@ module unload cuda 2>/dev/null || true
 LOG="logs/overnight.log"
 mkdir -p logs exp/inference/devset exp/scores/devset exp/ltr
 
+# Parse arguments
+SELECTED_MODELS="${1:-all}"
+echo "Selected models: $SELECTED_MODELS"
 echo "=== Overnight batch started at $(date) ===" | tee "$LOG"
 echo "Plan: train 4 bi-encoders + final ablation" | tee -a "$LOG"
 
@@ -45,6 +48,12 @@ MODELS[nv_embed]="nvidia/NV-Embed-v2"
 # Train each bi-encoder
 # =============================================================================
 for KEY in stella mxbai arctic nv_embed; do
+    # Skip if not selected
+    if [ "$SELECTED_MODELS" != "all" ] && ! echo "$SELECTED_MODELS" | grep -qw "$KEY"; then
+        echo "[${KEY}] skipped (not selected)" | tee -a "$LOG"
+        continue
+    fi
+
     MODEL_ID="${MODELS[$KEY]}"
     OUT_DIR="out/biencoder_${KEY}"
     OUT_LEG="exp/inference/devset/biencoder_${KEY}_top100.json"
