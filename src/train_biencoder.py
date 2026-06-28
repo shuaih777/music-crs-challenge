@@ -46,6 +46,48 @@ from datasets import load_dataset
 from tqdm import tqdm
 
 
+def _apply_transformers_compat_patches():
+    """Runtime patches for models written against older transformers (<5.x)."""
+    # 1. DynamicCache.from_legacy_cache was removed in transformers 5.x
+    try:
+        from transformers import DynamicCache
+        if not hasattr(DynamicCache, 'from_legacy_cache'):
+            @classmethod
+            def from_legacy_cache(cls, past_key_values=None):
+                cache = cls()
+                if past_key_values is not None:
+                    for layer_idx, (k, v) in enumerate(past_key_values):
+                        cache.update(k, v, layer_idx)
+                return cache
+            DynamicCache.from_legacy_cache = from_legacy_cache
+    except Exception:
+        pass
+
+    # 2. DynamicCache.get_usable_length renamed to get_seq_length in transformers 5.x
+    try:
+        from transformers import DynamicCache
+        if not hasattr(DynamicCache, 'get_usable_length') and hasattr(DynamicCache, 'get_seq_length'):
+            DynamicCache.get_usable_length = DynamicCache.get_seq_length
+    except Exception:
+        pass
+
+    # 3. all_tied_weights_keys: accessed as instance attr in transformers 5.x
+    #    but custom models (e.g. NVEmbedModel) may not initialize it
+    try:
+        import transformers.modeling_utils as _mu
+        _orig = _mu.PreTrainedModel._move_missing_keys_from_meta_to_device
+        def _patched(self, *args, **kwargs):
+            if not hasattr(self, 'all_tied_weights_keys'):
+                self.all_tied_weights_keys = {}
+            return _orig(self, *args, **kwargs)
+        _mu.PreTrainedModel._move_missing_keys_from_meta_to_device = _patched
+    except Exception:
+        pass
+
+
+_apply_transformers_compat_patches()
+
+
 # ============================================================================
 # Data preparation
 # ============================================================================
@@ -153,6 +195,34 @@ def cmd_train(args) -> None:
     print(f"Loading model: {args.model_id}", flush=True)
     model = SentenceTransformer(args.model_id, trust_remote_code=True)
 
+    # Gradient checkpointing: trades compute for memory (~50-70% less activation memory)
+    try:
+        model[0].auto_model.gradient_checkpointing_enable()
+        print("  gradient checkpointing enabled", flush=True)
+    except Exception as e:
+        print(f"  gradient checkpointing not available: {e}", flush=True)
+
+    # LoRA: for large models (e.g. NV-Embed-v2 7B) where full fine-tune exceeds GPU memory
+    if getattr(args, 'lora', False):
+        from peft import get_peft_model, LoraConfig, TaskType
+        lora_config = LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            target_modules="all-linear",
+            bias="none",
+            task_type=TaskType.FEATURE_EXTRACTION,
+        )
+        # NV-Embed style: outer NVEmbedModel wraps an inner embedding_model (Mistral LLM)
+        # Apply LoRA to the inner model, not the outer wrapper
+        inner = model[0].auto_model
+        if hasattr(inner, 'embedding_model') and inner.embedding_model is not None:
+            inner.embedding_model = get_peft_model(inner.embedding_model, lora_config)
+            inner.embedding_model.print_trainable_parameters()
+        else:
+            model[0].auto_model = get_peft_model(inner, lora_config)
+            model[0].auto_model.print_trainable_parameters()
+
     # Load training pairs
     print(f"Loading pairs from {args.train_jsonl}...", flush=True)
     examples = []
@@ -179,14 +249,29 @@ def cmd_train(args) -> None:
     print(f"Training: {args.epochs} epochs, batch_size={args.batch_size}, "
           f"warmup={warmup_steps} steps", flush=True)
 
+    # use_amp=True uses FP16 scaler which breaks with accelerate>=1.0 + PyTorch>=2.4.
+    # Cast model to BF16 manually instead — H100 native, fast, numerically stable.
+    import torch
+    model = model.to(torch.bfloat16)
     model.fit(
         train_objectives=[(train_dataloader, train_loss)],
         epochs=args.epochs,
         warmup_steps=warmup_steps,
         output_path=args.output_dir,
         show_progress_bar=True,
-        use_amp=True,  # bf16/fp16 automatic
+        use_amp=False,
     )
+
+    # Merge LoRA weights back into the base model so encode/inference work normally
+    if getattr(args, 'lora', False):
+        print("Merging LoRA weights into base model...", flush=True)
+        inner = model[0].auto_model
+        if hasattr(inner, 'embedding_model') and hasattr(inner.embedding_model, 'merge_and_unload'):
+            inner.embedding_model = inner.embedding_model.merge_and_unload()
+        elif hasattr(model[0].auto_model, 'merge_and_unload'):
+            model[0].auto_model = model[0].auto_model.merge_and_unload()
+        model.save(args.output_dir)
+        print(f"Merged model saved to {args.output_dir}", flush=True)
     print(f"Model saved to {args.output_dir}")
 
 
@@ -381,6 +466,10 @@ def main() -> None:
     tr.add_argument("--batch_size", type=int, default=256)
     tr.add_argument("--epochs", type=int, default=3)
     tr.add_argument("--max_examples", type=int, default=None)
+    tr.add_argument("--lora", action="store_true", help="Use LoRA for large models")
+    tr.add_argument("--lora_r", type=int, default=16)
+    tr.add_argument("--lora_alpha", type=int, default=32)
+    tr.add_argument("--lora_dropout", type=float, default=0.05)
 
     # encode_tracks
     et = sub.add_parser("encode_tracks")
@@ -407,6 +496,10 @@ def main() -> None:
     al.add_argument("--max_examples", type=int, default=None)
     al.add_argument("--n_output", type=int, default=100)
     al.add_argument("--split", default="test", choices=["test", "Blind-A", "Blind-B"])
+    al.add_argument("--lora", action="store_true", help="Use LoRA for large models")
+    al.add_argument("--lora_r", type=int, default=16)
+    al.add_argument("--lora_alpha", type=int, default=32)
+    al.add_argument("--lora_dropout", type=float, default=0.05)
 
     args = p.parse_args()
     if args.cmd == "build_data":

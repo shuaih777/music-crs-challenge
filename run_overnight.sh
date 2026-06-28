@@ -15,7 +15,7 @@
 #   nohup bash run_overnight.sh > logs/overnight.log 2>&1 &
 # =============================================================================
 
-set -euo pipefail
+set -uo pipefail
 
 if ! command -v module >/dev/null 2>&1; then
     [ -f /usr/share/Modules/init/bash ] && source /usr/share/Modules/init/bash
@@ -25,6 +25,8 @@ conda activate foundation_model 2>/dev/null || true
 export PATH="${CONDA_PREFIX:-$HOME/.conda/envs/foundation_model}/bin:$PATH"
 export LD_LIBRARY_PATH="${CONDA_PREFIX:-}/lib:${LD_LIBRARY_PATH:-}"
 module unload cuda 2>/dev/null || true
+
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 LOG="logs/overnight.log"
 mkdir -p logs exp/inference/devset exp/scores/devset exp/ltr
@@ -73,25 +75,57 @@ for KEY in stella mxbai arctic nv_embed; do
     # Determine batch size based on model size
     BATCH=256
     case "$KEY" in
-        stella) BATCH=128 ;;
-        mxbai) BATCH=128 ;;
-        arctic) BATCH=128 ;;
-        nv_embed) BATCH=32 ;;
+        stella) BATCH=64 ;;
+        mxbai) BATCH=32 ;;
+        arctic) BATCH=32 ;;
+        nv_embed) BATCH=4 ;;  # 7B model (Mistral-based): full fine-tune likely OOM regardless
     esac
 
-    PYTHONPATH=src python src/train_biencoder.py all \
-        --model_id "$MODEL_ID" \
-        --output_dir "$OUT_DIR" \
-        --out_leg "$OUT_LEG" \
-        --batch_size "$BATCH" \
-        --epochs 3 \
-        --n_output 100 \
-        2>&1 | tee -a "$LOG"
+    # Retry loop: halve batch size on OOM, up to 3 retries
+    CURRENT_BATCH=$BATCH
+    SUCCESS=0
+    for TRY in 1 2 3 4; do
+        echo "[${KEY}] Try ${TRY}/4 with batch_size=${CURRENT_BATCH}" | tee -a "$LOG"
+        TMP_LOG=$(mktemp)
+        LORA_FLAG=""
+        [ "$KEY" = "nv_embed" ] && LORA_FLAG="--lora"
 
-    echo "[${KEY}] Completed at $(date)" | tee -a "$LOG"
+        PYTHONPATH=src python src/train_biencoder.py all \
+            --model_id "$MODEL_ID" \
+            --output_dir "$OUT_DIR" \
+            --out_leg "$OUT_LEG" \
+            --batch_size "$CURRENT_BATCH" \
+            --epochs 3 \
+            --n_output 100 \
+            $LORA_FLAG \
+            > "$TMP_LOG" 2>&1
+        EXIT_CODE=$?
+        cat "$TMP_LOG" >> "$LOG"
+        if [ $EXIT_CODE -eq 0 ]; then
+            rm -f "$TMP_LOG"
+            SUCCESS=1
+            break
+        fi
+        if grep -qE "CUDA out of memory|OutOfMemoryError|out of memory" "$TMP_LOG"; then
+            CURRENT_BATCH=$((CURRENT_BATCH / 2))
+            echo "[${KEY}] OOM! Retrying with batch_size=${CURRENT_BATCH}" | tee -a "$LOG"
+            rm -rf "$OUT_DIR"
+            rm -f "$TMP_LOG"
+            if [ $CURRENT_BATCH -lt 4 ]; then
+                echo "[${KEY}] Batch size too small, skipping model" | tee -a "$LOG"
+                break
+            fi
+        else
+            echo "[${KEY}] Failed with non-OOM error (exit ${EXIT_CODE}), skipping" | tee -a "$LOG"
+            rm -f "$TMP_LOG"
+            break
+        fi
+    done
 
-    # Quick recall check
-    python -c "
+    if [ $SUCCESS -eq 1 ]; then
+        echo "[${KEY}] Completed at $(date)" | tee -a "$LOG"
+        # Quick recall check
+        python -c "
 import json
 gt = json.load(open('exp/ground_truth/devset.json'))
 preds = json.load(open('$OUT_LEG'))
@@ -100,6 +134,9 @@ pred_by_key = {(p['session_id'], p['turn_number']): set(p['predicted_track_ids']
 hit100 = sum(1 for k, g in gold_by_key.items() if g in pred_by_key.get(k, set()))
 print(f'  [{\"$KEY\"}] Hit@100: {hit100}/{len(gold_by_key)} = {hit100/len(gold_by_key)*100:.1f}%')
 " 2>&1 | tee -a "$LOG"
+    else
+        echo "[${KEY}] FAILED at $(date)" | tee -a "$LOG"
+    fi
 done
 
 # =============================================================================
