@@ -333,102 +333,41 @@ print(f'Wrote {len(examples)} examples ({n_with_gold} turns had gold in top-20)'
         --lora_alpha 32 \
         2>&1 | tee -a "$LOG"
 
-    # Step 3: Inference — rerank devset
-    echo "  [3/3] Reranking devset with fine-tuned model..." | tee -a "$LOG"
-    PYTHONPATH=src python -c "
-import json, os, sys, re
-import torch
-from datasets import load_dataset
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from peft import PeftModel
-from tqdm import tqdm
+    # Step 3: Inference — sharded across available GPUs for speed
+    echo "  [3/3] Reranking devset with fine-tuned model (sharded)..." | tee -a "$LOG"
 
-print('Loading model...', flush=True)
-base_id = 'Qwen/Qwen3-1.5B'
-tok = AutoTokenizer.from_pretrained(base_id, trust_remote_code=True, padding_side='left')
-if tok.pad_token is None: tok.pad_token = tok.eos_token
-model = AutoModelForCausalLM.from_pretrained(base_id, trust_remote_code=True,
-    torch_dtype=torch.bfloat16, device_map='auto')
-model = PeftModel.from_pretrained(model, 'out/listwise_reranker')
-model.eval()
-device = next(model.parameters()).device
+    # Find best inference to rerank
+    BEST_INF=""
+    for f in exp/inference/devset/lgbm_abl_plus_nvembed.json \
+             exp/inference/devset/lgbm_overnight_all.json \
+             exp/inference/devset/lgbm_biencoder_large.json; do
+        if [ -f "$f" ]; then BEST_INF="$f"; break; fi
+    done
 
-# Load candidates + metadata + conversations
-best_inf = None
-for f in ['exp/inference/devset/lgbm_abl_plus_nvembed.json',
-          'exp/inference/devset/lgbm_overnight_all.json']:
-    if os.path.exists(f): best_inf = f; break
-preds = json.load(open(best_inf))
-tracks_ds = load_dataset('talkpl-ai/TalkPlayData-Challenge-Track-Metadata', split='all_tracks')
-track_meta = {r['track_id']: r for r in tracks_ds}
-test = load_dataset('talkpl-ai/TalkPlayData-Challenge-Dataset', split='test')
-conversations = {ex['session_id']: ex['conversations'] for ex in test}
+    LISTWISE_OUT="exp/inference/devset/listwise_finetuned.json"
+    N_SHARDS=$NUM_GPUS
+    [ "$N_SHARDS" -gt 4 ] && N_SHARDS=4  # cap at 4 shards
 
-def build_context(convos, turn):
-    lines = []
-    for c in convos:
-        if c['turn_number'] > turn: break
-        if c['turn_number'] < turn:
-            if c['role'] == 'user': lines.append(f'User: {c[\"content\"]}')
-            elif c['role'] == 'assistant': lines.append(f'Assistant: {c[\"content\"][:80]}')
-        elif c['turn_number'] == turn and c['role'] == 'user':
-            lines.append(f'User: {c[\"content\"]}')
-    return '\n'.join(lines[-8:])
+    echo "  Using $N_SHARDS shards for parallel inference" | tee -a "$LOG"
 
-def track_desc(tid):
-    m = track_meta.get(tid, {})
-    name = ', '.join(m.get('track_name', []))[:40]
-    artist = ', '.join(m.get('artist_name', []))[:30]
-    tags = ', '.join(str(t) for t in (m.get('tag_list') or [])[:6])
-    year = (m.get('release_date') or '')[:4]
-    return f'\"{name}\" by {artist} ({tags}) [{year}]'
+    # Launch shards in parallel
+    for i in $(seq 0 $((N_SHARDS-1))); do
+        CUDA_VISIBLE_DEVICES=$i PYTHONPATH=src python src/listwise_shard_infer.py \
+            --shard $i --total_shards $N_SHARDS \
+            --model_dir out/listwise_reranker \
+            --base_model Qwen/Qwen3-1.5B \
+            --inference "$BEST_INF" \
+            --out "exp/inference/devset/listwise_shard_${i}.json" \
+            2>&1 | tail -3 | tee -a "$LOG" &
+    done
+    wait
+    echo "  All shards complete." | tee -a "$LOG"
 
-def parse_ranking(output, n):
-    numbers = [int(x) for x in re.findall(r'\d+', output)]
-    valid, seen = [], set()
-    for x in numbers:
-        if 1 <= x <= n and x not in seen:
-            valid.append(x - 1); seen.add(x)
-    for i in range(n):
-        if i not in seen: valid.append(i)
-    return valid[:n]
-
-print(f'Reranking {len(preds)} turns...', flush=True)
-output_rows = []
-for row in tqdm(preds, desc='listwise_ft'):
-    candidates = row['predicted_track_ids'][:20]
-    convos = conversations.get(row['session_id'], [])
-    context = build_context(convos, row['turn_number'])
-    track_lines = [f'[{i+1}] {track_desc(tid)}' for i, tid in enumerate(candidates)]
-
-    user_msg = f'Conversation:\n{context}\n\nCandidate tracks:\n' + '\n'.join(track_lines) + \
-               '\n\nRank ALL tracks from most to least relevant. Output only track numbers as comma-separated list:'
-    messages = [
-        {'role': 'system', 'content': 'You are a music recommendation expert. Rank tracks by relevance to the conversation.'},
-        {'role': 'user', 'content': user_msg},
-    ]
-    try:
-        prompt = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
-    except TypeError:
-        prompt = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-
-    inputs = tok(prompt, return_tensors='pt', truncation=True, max_length=2048).to(device)
-    with torch.no_grad():
-        out = model.generate(**inputs, max_new_tokens=100, do_sample=False, pad_token_id=tok.pad_token_id)
-    gen = tok.decode(out[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
-
-    ranking = parse_ranking(gen, len(candidates))
-    reranked = [candidates[i] for i in ranking]
-    output_rows.append({
-        'session_id': row['session_id'], 'user_id': row.get('user_id', ''),
-        'turn_number': row['turn_number'], 'predicted_track_ids': reranked,
-        'predicted_response': row.get('predicted_response', ''),
-    })
-
-with open('$LISTWISE_OUT', 'w') as f:
-    json.dump(output_rows, f, ensure_ascii=False)
-print(f'Wrote {len(output_rows)} to $LISTWISE_OUT')
-" 2>&1 | tee -a "$LOG"
+    # Merge shards
+    PYTHONPATH=src python src/listwise_shard_infer.py --merge \
+        --total_shards $N_SHARDS \
+        --out "$LISTWISE_OUT" \
+        2>&1 | tee -a "$LOG"
 
     echo "  [B] Done." | tee -a "$LOG"
 }
