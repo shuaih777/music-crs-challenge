@@ -50,7 +50,7 @@ else
         --model_id intfloat/e5-large-v2 \
         --output_dir out/e5_large \
         --out_leg "$E5_LEG" \
-        --batch_size 128 \
+        --batch_size 32 \
         --epochs 3 \
         --n_output 100 \
         2>&1 | tail -10 | tee -a "$LOG"
@@ -219,26 +219,32 @@ run_ablation() {
         2>&1 | grep "ndcg@20" | tee -a "$LOG"
 }
 
+# Run all ablations in parallel (252 cores; each LightGBM uses ~20 effective cores)
+# Already-scored ablations hit the skip branch and return instantly.
+
 # Ablation A: + E5-large
 if [ -f "$E5_LEG" ]; then
-    run_ablation "plus_e5" "${AVAILABLE_BASE},e5_large_top100"
+    run_ablation "plus_e5" "${AVAILABLE_BASE},e5_large_top100" &
 fi
 
 # Ablation B: bge-large top-200 (replace top-100 leg with top-200, increase pool)
 if [ -f "$BGE200_LEG" ]; then
     LEGS_B=$(echo "$AVAILABLE_BASE" | sed 's/biencoder_large_top100/biencoder_large_top200/')
-    run_ablation "top200" "$LEGS_B" 200
+    run_ablation "top200" "$LEGS_B" 200 &
 fi
 
 # Ablation C: + multi-query legs
 if [ -f "$MQ_LAST2" ] && [ -f "$MQ_CURRENT" ]; then
-    run_ablation "plus_mq" "${AVAILABLE_BASE},biencoder_last2turns_top100,biencoder_current_only_top100"
+    run_ablation "plus_mq" "${AVAILABLE_BASE},biencoder_last2turns_top100,biencoder_current_only_top100" &
 fi
 
 # Ablation D: + E5 + multi-query (combination)
 if [ -f "$E5_LEG" ] && [ -f "$MQ_LAST2" ]; then
-    run_ablation "plus_all_legs" "${AVAILABLE_BASE},e5_large_top100,biencoder_last2turns_top100,biencoder_current_only_top100"
+    run_ablation "plus_all_legs" "${AVAILABLE_BASE},e5_large_top100,biencoder_last2turns_top100,biencoder_current_only_top100" &
 fi
+
+# Wait for all parallel ablations to finish before Phase 3
+wait
 
 # =============================================================================
 # PHASE 3: Results comparison
