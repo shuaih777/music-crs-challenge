@@ -149,6 +149,8 @@ def main() -> None:
                    help="Batch size (1 for large models)")
     p.add_argument("--max_sessions", type=int, default=None,
                    help="Limit sessions for testing")
+    p.add_argument("--split", default="devset",
+                   help="devset (TalkPlayData-Challenge-Dataset test) or Blind-A / Blind-B")
     args = p.parse_args()
 
     try:
@@ -185,7 +187,10 @@ def main() -> None:
     tracks_ds = load_dataset("talkpl-ai/TalkPlayData-Challenge-Track-Metadata", split="all_tracks")
     track_meta = {r["track_id"]: r for r in tracks_ds}
 
-    convo_ds = load_dataset("talkpl-ai/TalkPlayData-Challenge-Dataset", split="test")
+    if args.split == "devset":
+        convo_ds = load_dataset("talkpl-ai/TalkPlayData-Challenge-Dataset", split="test")
+    else:
+        convo_ds = load_dataset(f"talkpl-ai/TalkPlayData-Challenge-{args.split}", split="test")
     conversations = {ex["session_id"]: ex["conversations"] for ex in convo_ds}
 
     # Pre-build all (row, candidates, prompt) tuples
