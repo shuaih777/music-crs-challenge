@@ -90,7 +90,7 @@ for KEY in stella mxbai arctic nv_embed; do
         LORA_FLAG=""
         [ "$KEY" = "nv_embed" ] && LORA_FLAG="--lora"
 
-        PYTHONPATH=src python src/train_biencoder.py all \
+        PYTHONPATH=src .venv/bin/python src/train_biencoder.py all \
             --model_id "$MODEL_ID" \
             --output_dir "$OUT_DIR" \
             --out_leg "$OUT_LEG" \
@@ -125,7 +125,7 @@ for KEY in stella mxbai arctic nv_embed; do
     if [ $SUCCESS -eq 1 ]; then
         echo "[${KEY}] Completed at $(date)" | tee -a "$LOG"
         # Quick recall check
-        python -c "
+        .venv/bin/python -c "
 import json
 gt = json.load(open('exp/ground_truth/devset.json'))
 preds = json.load(open('$OUT_LEG'))
@@ -173,7 +173,7 @@ ALL_LEGS="${BASE_LEGS},${ALL_BIENC_LEGS}"
 echo "" | tee -a "$LOG"
 echo "[ablation] ALL legs combined: $ALL_LEGS" | tee -a "$LOG"
 
-PYTHONPATH=src python src/train_ltr_v2.py \
+PYTHONPATH=src .venv/bin/python src/train_ltr_v2.py \
     --legs "$ALL_LEGS" \
     --inference_dir exp/inference/devset \
     --ground_truth exp/ground_truth/devset.json \
@@ -183,7 +183,7 @@ PYTHONPATH=src python src/train_ltr_v2.py \
     --out_inference exp/inference/devset/lgbm_overnight_all.json \
     2>&1 | grep -E "positive|fold|Feature" | tee -a "$LOG"
 
-PYTHONPATH=src python src/evaluate.py \
+PYTHONPATH=src .venv/bin/python src/evaluate.py \
     --inference exp/inference/devset/lgbm_overnight_all.json \
     --scores exp/scores/devset/lgbm_overnight_all.json \
     --ground_truth exp/ground_truth/devset.json \
@@ -192,13 +192,13 @@ PYTHONPATH=src python src/evaluate.py \
 # Add responses to the best result
 echo "" | tee -a "$LOG"
 echo "[responses] Adding LLM responses..." | tee -a "$LOG"
-PYTHONPATH=src python src/generate_responses.py \
+PYTHONPATH=src .venv/bin/python src/generate_responses.py \
     --inference exp/inference/devset/lgbm_overnight_all.json \
     --out exp/inference/devset/lgbm_overnight_final.json \
     --mode auto --model Qwen/Qwen3-0.6B \
     2>&1 | tail -3 | tee -a "$LOG"
 
-PYTHONPATH=src python src/evaluate.py \
+PYTHONPATH=src .venv/bin/python src/evaluate.py \
     --inference exp/inference/devset/lgbm_overnight_final.json \
     --scores exp/scores/devset/lgbm_overnight_final.json \
     --ground_truth exp/ground_truth/devset.json \
@@ -209,7 +209,7 @@ PYTHONPATH=src python src/evaluate.py \
 # =============================================================================
 echo "" | tee -a "$LOG"
 echo "=== FINAL SUMMARY ===" | tee -a "$LOG"
-python -c "
+.venv/bin/python -c "
 import json, os
 configs = [
     ('lgbm_v2', 'Previous best (0.1686)'),

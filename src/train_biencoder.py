@@ -139,6 +139,36 @@ def cmd_build_data(args) -> None:
 # Training
 # ============================================================================
 
+def _apply_nvembed_fix(model):
+    """Fix BidirectionalMistralModel for transformers 4.45+."""
+    try:
+        import torch as _torch
+        from transformers import MistralModel as _MM
+        from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask as _pm
+        from transformers.modeling_outputs import BaseModelOutputWithPast as _BMO
+        inner = getattr(model[0].auto_model, 'embedding_model', None)
+        if inner is not None and isinstance(inner, _MM) and type(inner) is not _MM:
+            def _fwd(self, input_ids=None, attention_mask=None, position_ids=None,
+                     past_key_values=None, inputs_embeds=None, **_kw):
+                if inputs_embeds is None:
+                    inputs_embeds = self.embed_tokens(input_ids)
+                _, seq_len = inputs_embeds.shape[:2]
+                if position_ids is None:
+                    position_ids = _torch.arange(seq_len, dtype=_torch.long,
+                                                 device=inputs_embeds.device).unsqueeze(0)
+                mask = _pm(attention_mask, inputs_embeds.dtype) if attention_mask is not None else None
+                hidden_states = inputs_embeds
+                pe = self.rotary_emb(hidden_states, position_ids)
+                for layer in self.layers:
+                    hidden_states = layer(hidden_states, attention_mask=mask,
+                                         position_ids=position_ids, position_embeddings=pe)
+                return _BMO(last_hidden_state=self.norm(hidden_states))
+            inner.__class__.forward = _fwd
+            print("  applied NV-Embed bidirectional forward fix", flush=True)
+    except Exception:
+        pass
+
+
 def cmd_train(args) -> None:
     """Fine-tune bi-encoder with MultipleNegativesRankingLoss."""
     try:
@@ -153,40 +183,13 @@ def cmd_train(args) -> None:
 
     print(f"Loading model: {args.model_id}", flush=True)
     model = SentenceTransformer(args.model_id, trust_remote_code=True)
+    # Cap sequence length — large models (e.g. NV-Embed-v2 supports 32768) would OOM
+    # on 80GB with any batch size since attention is O(seq_len²). 512 covers music queries.
+    if model.max_seq_length is None or model.max_seq_length > 512:
+        model.max_seq_length = 512
+        print(f"  capped max_seq_length to 512", flush=True)
 
-    # NV-Embed: BidirectionalMistralModel.forward was written for an older transformers
-    # API where (a) decoder layers returned tuples and (b) RoPE was computed inside
-    # attention rather than passed in as position_embeddings. Both have changed in 4.45+.
-    # Fix: replace the forward entirely with a corrected version that keeps bidirectional
-    # masking (_prepare_4d_attention_mask) while using the current decoder layer API.
-    try:
-        import torch as _torch
-        from transformers import MistralModel as _MistralModel
-        from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask as _prep_mask
-        from transformers.modeling_outputs import BaseModelOutputWithPast as _BMOWithPast
-        _inner = getattr(model[0].auto_model, 'embedding_model', None)
-        if _inner is not None and isinstance(_inner, _MistralModel) and type(_inner) is not _MistralModel:
-            def _bidir_forward(self, input_ids=None, attention_mask=None, position_ids=None,
-                                past_key_values=None, inputs_embeds=None, **_kw):
-                if inputs_embeds is None:
-                    inputs_embeds = self.embed_tokens(input_ids)
-                _, seq_len = inputs_embeds.shape[:2]
-                if position_ids is None:
-                    position_ids = _torch.arange(seq_len, dtype=_torch.long,
-                                                 device=inputs_embeds.device).unsqueeze(0)
-                # bidirectional mask (not causal)
-                mask = _prep_mask(attention_mask, inputs_embeds.dtype) if attention_mask is not None else None
-                hidden_states = inputs_embeds
-                position_embeddings = self.rotary_emb(hidden_states, position_ids)
-                for layer in self.layers:
-                    hidden_states = layer(hidden_states, attention_mask=mask,
-                                         position_ids=position_ids,
-                                         position_embeddings=position_embeddings)
-                return _BMOWithPast(last_hidden_state=self.norm(hidden_states))
-            _inner.__class__.forward = _bidir_forward
-            print("  applied NV-Embed bidirectional forward fix", flush=True)
-    except Exception:
-        pass
+    _apply_nvembed_fix(model)
 
     # Gradient checkpointing: trades compute for memory (~50-70% less activation memory)
     try:
@@ -282,6 +285,7 @@ def cmd_encode_tracks(args) -> None:
 
     print(f"Loading model from {args.model_dir}...", flush=True)
     model = SentenceTransformer(args.model_dir, trust_remote_code=True)
+    _apply_nvembed_fix(model)
 
     print("Loading track metadata...", flush=True)
     tracks_ds = load_dataset("talkpl-ai/TalkPlayData-Challenge-Track-Metadata", split="all_tracks")
@@ -321,6 +325,7 @@ def cmd_inference(args) -> None:
 
     print(f"Loading model from {args.model_dir}...", flush=True)
     model = SentenceTransformer(args.model_dir, trust_remote_code=True)
+    _apply_nvembed_fix(model)
 
     # Load track embeddings
     print(f"Loading track embeddings from {args.track_emb}...", flush=True)
@@ -366,27 +371,27 @@ def cmd_inference(args) -> None:
         convert_to_numpy=True,
     ).astype(np.float32)
 
-    # Retrieve top-K for each query
+    # Retrieve top-K — chunked matmul (dgemm) to saturate all CPU cores
     print(f"Retrieving top-{args.n_output} per query...", flush=True)
+    CHUNK = 2000
     rows: List[dict] = []
-    for i, q in enumerate(tqdm(queries, desc="retrieval")):
-        scores = track_embs @ query_embs[i]
-
-        # No-repeat: mask prior tracks
-        for tid in q["prior_tracks"]:
-            if tid in track_to_idx:
-                scores[track_to_idx[tid]] = -1e9
-
-        top_indices = np.argsort(-scores)[:args.n_output]
-        preds = [track_ids[idx] for idx in top_indices]
-
-        rows.append({
-            "session_id": q["session_id"],
-            "user_id": q["user_id"],
-            "turn_number": q["turn_number"],
-            "predicted_track_ids": preds,
-            "predicted_response": "",
-        })
+    for start in tqdm(range(0, len(queries), CHUNK), desc="retrieval"):
+        end = min(start + CHUNK, len(queries))
+        # (n_tracks, dim) @ (dim, chunk) → (n_tracks, chunk) then transpose
+        chunk_scores = (track_embs @ query_embs[start:end].T).T  # (chunk, n_tracks)
+        for j, q in enumerate(queries[start:end]):
+            scores = chunk_scores[j].copy()
+            for tid in q["prior_tracks"]:
+                if tid in track_to_idx:
+                    scores[track_to_idx[tid]] = -1e9
+            top_indices = np.argsort(-scores)[:args.n_output]
+            rows.append({
+                "session_id": q["session_id"],
+                "user_id": q["user_id"],
+                "turn_number": q["turn_number"],
+                "predicted_track_ids": [track_ids[idx] for idx in top_indices],
+                "predicted_response": "",
+            })
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:

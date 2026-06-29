@@ -267,12 +267,16 @@ def train_and_predict(X, labels, groups, feature_names, n_folds=5, params=None):
     n_groups = len(groups)
     fold_size = n_groups // n_folds
     oof_preds = np.zeros(len(X), dtype=np.float32)
-    models = []
 
-    for fold in range(n_folds):
+    import os
+    from joblib import Parallel, delayed
+    total_cores = os.cpu_count() or 1
+    n_jobs_per_fold = max(1, total_cores // n_folds)
+    fold_params = dict(params, n_jobs=n_jobs_per_fold)
+
+    def _train_fold(fold):
         val_start = fold * fold_size
         val_end = val_start + fold_size if fold < n_folds - 1 else n_groups
-
         val_row_start = int(group_boundaries[val_start])
         val_row_end = int(group_boundaries[val_end])
         train_mask = np.ones(len(X), dtype=bool)
@@ -280,20 +284,25 @@ def train_and_predict(X, labels, groups, feature_names, n_folds=5, params=None):
 
         X_train, y_train = X[train_mask], labels[train_mask]
         X_val, y_val = X[~train_mask], labels[~train_mask]
-
         train_groups = [groups[i] for i in range(n_groups) if i < val_start or i >= val_end]
         val_groups = [groups[i] for i in range(val_start, val_end)]
 
         train_ds = lgb.Dataset(X_train, label=y_train, group=train_groups, feature_name=feature_names)
         val_ds = lgb.Dataset(X_val, label=y_val, group=val_groups, feature_name=feature_names, reference=train_ds)
-
-        model = lgb.train(params, train_ds, num_boost_round=500, valid_sets=[val_ds],
+        model = lgb.train(fold_params, train_ds, num_boost_round=500, valid_sets=[val_ds],
                           callbacks=[lgb.early_stopping(50, verbose=True), lgb.log_evaluation(50)])
-        models.append(model)
-
         preds = model.predict(X_val)
-        oof_preds[val_row_start:val_row_end] = preds
         print(f"  fold {fold+1}/{n_folds}: best_iter={model.best_iteration}", flush=True)
+        return fold, model, preds, val_row_start, val_row_end
+
+    print(f"  running {n_folds} folds in parallel ({n_jobs_per_fold} threads/fold, {total_cores} total cores)", flush=True)
+    results = Parallel(n_jobs=n_folds, prefer="threads")(
+        delayed(_train_fold)(f) for f in range(n_folds)
+    )
+    models = [None] * n_folds
+    for fold, model, preds, rs, re in results:
+        models[fold] = model
+        oof_preds[rs:re] = preds
 
     return oof_preds, models
 
