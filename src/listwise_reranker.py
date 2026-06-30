@@ -184,7 +184,7 @@ def main() -> None:
     if args.max_sessions:
         rows = rows[:args.max_sessions * 8]
 
-    tracks_ds = load_dataset("talkpl-ai/TalkPlayData-Challenge-Track-Metadata", split="all_tracks")
+    tracks_ds = load_dataset("parquet", data_files={"train": "hf://datasets/talkpl-ai/TalkPlayData-Challenge-Track-Metadata/data/all_tracks-00000-of-00001.parquet"}, split="train")
     track_meta = {r["track_id"]: r for r in tracks_ds}
 
     if args.split == "devset":
