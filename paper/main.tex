@@ -20,7 +20,7 @@
 \email{shuaishu@email.unc.edu}
 
 \begin{abstract}
-We present our solution to the RecSys Challenge 2026 on Conversational Music Recommendation (Music-CRS). The task requires recommending music tracks from a catalog of 47,071 items given multi-turn dialogue context and user profiles. Our approach employs a multi-stage pipeline: (1) diverse retrieval using multiple independently-trained bi-encoders (BGE, E5, NV-Embed-v2) alongside BM25 and collaborative filtering legs to maximize recall, (2) learned-to-rank fusion via LightGBM LambdaRank that exploits per-candidate features including raw cosine similarities, and (3) LLM-based response generation for natural language explanations. Key findings include: domain-fine-tuned bi-encoders with different base architectures provide complementary recall (+9.4\% nDCG@20 each), the 7.8B NV-Embed-v2 model provides unique recall that smaller models cannot match, and simple gradient-boosted reranking outperforms both pointwise and listwise neural rerankers on this task. Our system achieves nDCG@20 = 0.185 on the development set, a 127\% improvement over the official BM25 + LLaMA-1B baseline (0.0815). Code: \url{https://github.com/shuaih777/music-crs-challenge}. Team: shuaih.
+We present our solution to the RecSys Challenge 2026 on Conversational Music Recommendation (Music-CRS). The task requires recommending music tracks from a catalog of 47,071 items given multi-turn dialogue context and user profiles. Our approach employs a multi-stage pipeline: (1) diverse retrieval using multiple independently-trained bi-encoders (BGE, E5, NV-Embed-v2) alongside BM25 and collaborative filtering legs to maximize recall, (2) learned-to-rank fusion via LightGBM LambdaRank that exploits per-candidate features including raw cosine similarities, and (3) LLM-based response generation for natural language explanations. Key findings include: domain-fine-tuned bi-encoders with different base architectures provide complementary recall (+9.4\% nDCG@20 each), the 7.8B NV-Embed-v2 model provides unique recall that smaller models cannot match, and simple gradient-boosted reranking outperforms both pointwise and listwise neural rerankers on this task. Our system achieves nDCG@20 = 0.185 on the development set, a 127\% improvement over the official BM25 + LLaMA-1B baseline (0.0815). On the official Blind-B test set, our system obtains nDCG@20 = 0.304 with a composite score of 0.252 (rank 38/40). Code: \url{https://github.com/shuaih777/music-crs-challenge}. Team: shuaih.
 \end{abstract}
 
 \maketitle
@@ -96,7 +96,7 @@ The single largest improvement came from NV-Embed-v2 (7.8B parameters), which co
 
 \subsection{Dataset}
 
-The TalkPlayData-Challenge dataset~\cite{talkplay2026} contains 15,199 training and 1,000 development sessions, each with 8 conversation turns. The track catalog has 47,071 items with metadata, tags, and pre-computed embeddings across 6 modalities.
+The TalkPlayData-Challenge dataset~\cite{talkplay2026} contains 15,199 training and 1,000 development sessions, each with 8 conversation turns. The track catalog has 47,071 items with metadata, tags, and pre-computed embeddings across 6 modalities. We use \textbf{no additional external datasets}; all training is conducted exclusively on the provided challenge data.
 
 \subsection{Evaluation}
 
@@ -149,6 +149,10 @@ Listwise reranker (8B) & $-0.003$ & -- \\
 \subsection{Per-Turn Analysis}
 
 Performance varies significantly across turns: Turn 2 achieves the highest nDCG@20 (0.21) as the model has one prior accept as signal, while Turn 1 (explicit queries) and Turns 7--8 (conversation drift) are weakest. The collaborative filtering and bi-encoder legs are most valuable at later turns.
+
+\subsection{Blind Test Set Results}
+
+On the official Blind-B evaluation, our system achieves a composite score of 0.252 (nDCG@20 = 0.304, Catalog Diversity = 0.031, Lexical Diversity = 0.629, LLM-as-a-Judge = 1.45). While nDCG@20 improves significantly over our development set performance, the low Catalog Diversity score (0.031) indicates that our system over-concentrates recommendations on a small subset of popular tracks. This is a known limitation of the ``voting'' mechanism in our LightGBM reranker, which favors tracks appearing in multiple retrieval legs---these tend to be well-known items. A post-hoc diversification step (e.g., MMR) would likely address this but was not implemented before the deadline.
 
 \section{Conclusion}
 
