@@ -8,6 +8,9 @@
 \renewcommand\footnotetextcopyrightpermission[1]{}
 \pagestyle{plain}
 
+\usepackage{tikz}
+\usetikzlibrary{positioning, fit, backgrounds}
+
 \begin{document}
 
 \title{Multi-Stage Retrieval with Diverse Bi-Encoders for\\Conversational Music Recommendation}
@@ -33,6 +36,8 @@ Our approach prioritizes recall expansion through model diversity. Rather than r
 \section{System Architecture}
 
 Our pipeline consists of three stages (Figure~\ref{fig:pipeline}):
+
+\input{fig_pipeline.tex}
 
 \subsection{Stage 1: Multi-Modal Retrieval}
 
