@@ -1,13 +1,15 @@
 % Pipeline figure for Music-CRS paper
 % Compile standalone or include in main.tex with \input{fig_pipeline.tex}
+% Requires: \usepackage{tikz} \usetikzlibrary{positioning, fit, backgrounds}
 \begin{figure*}[t]
 \centering
 \resizebox{\textwidth}{!}{%
 \begin{tikzpicture}[
     node distance=0.4cm and 0.3cm,
-    box/.style={draw, rounded corners=3pt, minimum height=0.9cm, text centered, font=\small},
+    box/.style={draw, rounded corners=3pt, align=center, minimum height=0.9cm, font=\small},
     stage/.style={draw, rounded corners=5pt, dashed, inner sep=8pt, thick, fill=gray!5},
     leg/.style={box, fill=blue!10, minimum width=1.8cm, font=\scriptsize},
+    note/.style={font=\scriptsize, text=gray, anchor=west},
     arrow/.style={->, thick, >=stealth},
 ]
 
@@ -19,17 +21,21 @@
     \end{tabular}
 };
 
-% Stage 1
-\node[below=0.6cm of input] (s1label) {};
-\node[leg, below=0.9cm of input, xshift=-5cm] (bm25) {BM25\\(sparse)};
+% Stage 1: retrieval legs
+\node[leg, below=1.4cm of input, xshift=-5cm] (bm25) {BM25\\(sparse)};
 \node[leg, right=0.2cm of bm25] (dense) {Dense Emb\\(meta/cf/img)};
 \node[leg, right=0.2cm of dense] (pmi) {PMI\\co-occur.};
-\node[leg, right=0.2cm of pmi] (bienc) {BGE / E5 /\\Stella (×5)};
+\node[leg, right=0.2cm of pmi] (bienc) {BGE / E5 /\\Stella ($\times$5)};
 \node[leg, right=0.2cm of bienc] (nvemb) {NV-Embed\\v2 (7.8B)};
-\node[leg, right=0.2cm of nvemb] (mq) {Multi-\\query (×2)};
+\node[leg, right=0.2cm of nvemb] (mq) {Multi-\\query ($\times$2)};
+
+% Stage 1 title sits INSIDE the dashed box, so the incoming arrow (which stops
+% at the box border) cannot run through it.
+\node[font=\small\bfseries, anchor=south west] (s1title)
+    at ([yshift=4pt]bm25.north west) {Stage 1: Diverse Retrieval (13 legs $\times$ top-100)};
 
 \begin{scope}[on background layer]
-\node[stage, fit=(bm25)(dense)(pmi)(bienc)(nvemb)(mq), label={[font=\small\bfseries]above:Stage 1: Diverse Retrieval (13 legs $\times$ top-100)}] (s1box) {};
+\node[stage, fit=(s1title)(bm25)(dense)(pmi)(bienc)(nvemb)(mq)] (s1box) {};
 \end{scope}
 
 % Arrow from input to stage 1
@@ -66,10 +72,11 @@
 };
 \draw[arrow] (resp.south) -- (output.north);
 
-% Annotations on right side
-\node[right=0.3cm of nvemb, font=\scriptsize, text=gray] {Hit@100$\approx$48\%};
-\node[right=0.5cm of union, font=\scriptsize, text=gray] {Hit@20=39.1\%};
-\node[right=0.5cm of lgbm, font=\scriptsize, text=gray] {nDCG@20=0.185};
+% Annotations, left-aligned in a single column just outside the widest box
+\coordinate (ann) at ([xshift=0.35cm]s1box.east);
+\node[note] at (ann)          {Hit@100$\approx$48\%};
+\node[note] at (ann |- union) {Hit@20=39.1\%};
+\node[note] at (ann |- lgbm)  {nDCG@20=0.185};
 
 \end{tikzpicture}
 }

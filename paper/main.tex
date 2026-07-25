@@ -16,7 +16,12 @@
 \title{Multi-Stage Retrieval with Diverse Bi-Encoders for\\Conversational Music Recommendation}
 
 \author{Shuai Huang}
-\affiliation{\institution{University of North Carolina at Chapel Hill}}
+\affiliation{%
+  \institution{University of North Carolina at Chapel Hill}
+  \city{Chapel Hill}
+  \state{NC}
+  \country{USA}
+}
 \email{shuaishu@email.unc.edu}
 
 \begin{abstract}
@@ -55,7 +60,7 @@ We employ 13 independent retrieval legs, each producing a top-100 candidate list
 
 \subsection{Stage 2: Learned-to-Rank Fusion}
 
-We form a candidate pool by taking the union of all 13 legs' top-100 outputs (~200-400 unique candidates per turn). A LightGBM LambdaRank model is trained to re-rank candidates with the following features per candidate:
+We form a candidate pool by taking the union of all 13 legs' top-100 outputs ($\sim$200--400 unique candidates per turn). A LightGBM LambdaRank model is trained to re-rank candidates with the following features per candidate:
 
 \begin{itemize}
     \item Rank and RRF-style score ($1/(60+\text{rank})$) in each leg
@@ -105,9 +110,12 @@ We report nDCG@\{1, 10, 20\}, Hit@20 (proportion of turns where the gold track a
 \subsection{Results}
 
 \begin{table}[h]
+\centering
 \caption{Development set results. Baseline is the official LLaMA-3.2-1B + BM25.}
 \label{tab:results}
-\begin{tabular}{lcccc}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lcccc@{}}
 \toprule
 System & nDCG@20 & Hit@20 & nDCG@1 & Dist-2 \\
 \midrule
@@ -126,9 +134,12 @@ LightGBM (9 legs) & 0.146 & 30.8\% & 0.051 & -- \\
 \subsection{Ablation: Retrieval Legs}
 
 \begin{table}[h]
+\centering
 \caption{Incremental contribution of each retrieval leg type.}
 \label{tab:ablation}
-\begin{tabular}{lcc}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lcc@{}}
 \toprule
 Addition & $\Delta$ nDCG@20 & Hit@20 \\
 \midrule
