@@ -20,6 +20,8 @@ Key finding: **model diversity in retrieval** dominates all other improvements. 
 
 ## Results
 
+### Development set
+
 | System | nDCG@20 | Hit@20 |
 |--------|---------|--------|
 | Official baseline (LLaMA-1B + BM25) | 0.082 | — |
@@ -27,6 +29,16 @@ Key finding: **model diversity in retrieval** dominates all other improvements. 
 | + LightGBM (9 legs) | 0.146 | 30.8% |
 | + Bi-encoder (BGE-large) | 0.165 | 35.2% |
 | **+ NV-Embed-v2 (13 legs)** | **0.185** | **39.1%** |
+
+### Official Blind-B test set
+
+| Metric | Score |
+|--------|-------|
+| nDCG@20 | 0.304 |
+| Catalog Diversity | 0.031 |
+| Lexical Diversity | 0.629 |
+| LLM-as-Judge | 1.45 |
+| **Composite** | **0.252** |
 
 ---
 
