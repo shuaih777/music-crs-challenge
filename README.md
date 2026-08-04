@@ -4,6 +4,8 @@ Our solution for the [Music Conversational Recommendation Challenge](https://nlp
 
 > **Final result**: nDCG@20 = **0.185** on devset (+127% over official baseline), **0.304** on Blind-B test set. Composite score 0.252.
 
+All trained weights are public on Hugging Face: **[shuaih777/music-challenge-models](https://huggingface.co/shuaih777/music-challenge-models)** — see [Inference Pipeline](#inference-pipeline-blind-b--predictionsjson) below to run Blind-B → `predictions.json` without retraining.
+
 ---
 
 ## Approach
@@ -59,6 +61,69 @@ See [REPRODUCE.md](REPRODUCE.md) for detailed instructions.
 
 ---
 
+## Inference Pipeline: Blind-B → `predictions.json`
+
+All trained weights (6 bi-encoders + LightGBM reranker + PMI matrix) are published publicly, so you can run the full pipeline on a held-out split **without training anything**:
+
+👉 **[huggingface.co/shuaih777/music-challenge-models](https://huggingface.co/shuaih777/music-challenge-models)**
+
+```
+Blind-Dataset-B (talkpl-ai/TalkPlayData-Challenge-Blind-B)
+        │
+        ▼
+┌────────────────────────────────────────────────────────────┐
+│  13 retrieval legs → top-100 candidates each                │
+│  • sparse:  BM25 (no-repeat)                                 │
+│  • dense (frozen embeddings): metadata-qwen3, cf_bpr,        │
+│    decay_descending                                          │
+│  • PMI item-item co-occurrence                                │
+│  • 6 fine-tuned bi-encoders: bge-base, bge-large, e5-large,   │
+│    stella, mxbai, NV-Embed-v2 (LoRA)                          │
+│  • 2 multi-query variants of bge-large (last-2-turns,          │
+│    current-utterance-only)                                    │
+└────────────────────────────────────────────────────────────┘
+        │  union candidate pool (~200-400 tracks/turn)
+        ▼
+┌────────────────────────────────────────────────────────────┐
+│  LightGBM LambdaRank reranker (lgbm_reproduce.txt)            │
+│  features: per-leg rank + RRF score, bi-encoder cosine,       │
+│  track popularity, turn number, PMI sum, #legs agreeing        │
+└────────────────────────────────────────────────────────────┘
+        │  top-20 tracks/turn
+        ▼
+┌────────────────────────────────────────────────────────────┐
+│  Qwen3-0.6B response generation (nucleus sampling)             │
+└────────────────────────────────────────────────────────────┘
+        │
+        ▼
+   predictions.json   (N sessions × 8 turns, submit to Codabench)
+```
+
+### Run it
+
+```bash
+pip install -r requirements.txt && pip install -r requirements-gpu.txt
+
+# 1. Pull all pretrained weights (~22GB) instead of retraining
+python -c "
+from huggingface_hub import snapshot_download
+snapshot_download(repo_id='shuaih777/music-challenge-models', local_dir='.hf_download')
+"
+mkdir -p out exp/ltr
+mv .hf_download/{biencoder,biencoder_large,e5_large,biencoder_mxbai,biencoder_stella,biencoder_nv_embed} out/
+mv .hf_download/reranker/lgbm_reproduce.txt exp/ltr/
+mv .hf_download/pmi/* exp/
+rm -rf .hf_download
+
+# 2. Run the 13-leg pipeline against Blind-B
+bash scripts/run_blind_b_13leg.sh
+# → exp/inference/blind_b_13leg/predictions.json
+```
+
+`run_blind_b_13leg.sh` mirrors `reproduce.sh` step-for-step (same 13 legs, same reranker) but targets `talkpl-ai/TalkPlayData-Challenge-Blind-B` and skips training — every step is inference-only, so no GPU-hours beyond encoding queries and generating responses.
+
+---
+
 ## Repository Structure
 
 ```
@@ -72,9 +137,10 @@ See [REPRODUCE.md](REPRODUCE.md) for detailed instructions.
 │   ├── evaluate.py              # Evaluation metrics
 │   └── ...                      # Additional utilities
 ├── scripts/                     # Experimental pipeline scripts
+│   └── run_blind_b_13leg.sh     # Full 13-leg pipeline on Blind-B → predictions.json
 ├── exp/                         # Experiment outputs (inference JSONs, scores)
 ├── research/                    # Research notes and synthesis
-├── reproduce.sh                 # End-to-end reproduction script
+├── reproduce.sh                 # End-to-end reproduction script (devset)
 ├── REPRODUCE.md                 # Detailed reproduction guide
 ├── requirements.txt             # CPU dependencies
 └── requirements-gpu.txt         # GPU dependencies

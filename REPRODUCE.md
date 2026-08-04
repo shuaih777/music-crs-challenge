@@ -4,6 +4,8 @@
 
 Our best submission (nDCG@20 = 0.185 on devset) uses a 13-leg retrieval ensemble reranked by LightGBM. The full pipeline takes ~12-15h on a single H100 (mostly bi-encoder training), or ~3-4h with 4 GPUs in parallel.
 
+**Skip training entirely**: all 6 bi-encoder checkpoints + the LightGBM reranker + PMI matrix are published at [huggingface.co/shuaih777/music-challenge-models](https://huggingface.co/shuaih777/music-challenge-models). See the [Inference Pipeline section of README.md](README.md#inference-pipeline-blind-b--predictionsjson) to go straight from a held-out split to `predictions.json`.
+
 ## Hardware Requirements
 
 - **GPU**: 1× H100 80GB (or A100 80GB). Multiple GPUs recommended for parallel bi-encoder training.
