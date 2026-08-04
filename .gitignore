@@ -28,7 +28,14 @@ logs/*.log
 data/*.jsonl
 out/
 
-# Don't ship the upstream nlp4musa clones — see README for clone instructions
+# Session logs (internal, not for public)
+2026-*.txt
+session_archive/
+
+# Submission binaries
+*.zip
+
+# Don't ship the upstream nlp4musa clones
 music-crs-baselines/
 music-crs-evaluator/
 
