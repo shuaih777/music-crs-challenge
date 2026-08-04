@@ -113,7 +113,7 @@ for SPEC in \
     PYTHONPATH=src python src/train_biencoder.py inference \
         --model_dir "$MODEL_DIR" --track_emb "$MODEL_DIR/track_embeddings.npy" \
         --out "$OUT" --split "$SPLIT" --n_output 100 --batch_size "$BATCH" \
-        2>&1 | grep -E "Wrote|queries|Loading" | tee -a "$LOG"
+        2>&1 | grep -E "Wrote|queries|Loading|Error|Traceback|error" | tee -a "$LOG"
 done
 
 # =============================================================================
@@ -166,7 +166,7 @@ def run_mode(mode, out_path):
     print(f'Wrote {len(rows)} to {out_path}')
 if not os.path.exists('$MQ_LAST2'): run_mode('last2', '$MQ_LAST2')
 if not os.path.exists('$MQ_CURRENT'): run_mode('current', '$MQ_CURRENT')
-" 2>&1 | grep -E "Wrote|Encoding" | tee -a "$LOG"
+" 2>&1 | grep -E "Wrote|Encoding|Error|Traceback|error" | tee -a "$LOG"
 fi
 
 # =============================================================================
@@ -188,21 +188,66 @@ PYTHONPATH=src python src/score_blind_v2.py \
     2>&1 | tee -a "$LOG"
 
 # =============================================================================
-# Step 6: Generate responses -> final predictions.json
+# Step 6: Generate responses for all 640 (session, turn) candidates
 # =============================================================================
 echo "" | tee -a "$LOG"
 echo "[step 6] Generating responses..." | tee -a "$LOG"
 PYTHONPATH=src python src/generate_responses.py \
     --inference "${OUT_DIR}/lgbm_scored.json" \
-    --out "${OUT_DIR}/predictions.json" \
+    --out "${OUT_DIR}/lgbm_with_responses_640.json" \
     --mode auto --model Qwen/Qwen3-0.6B \
     2>&1 | tail -5 | tee -a "$LOG"
 
 # =============================================================================
-# Step 7: Validate submission format
+# Step 7: Filter to one row per session at its LAST turn -> predictions.json
+# =============================================================================
+# Blind-B's 80 sessions are each truncated at a different turn (10 sessions
+# each at turns 1-8) — conversations[-1]['turn_number'] is the one real turn
+# to predict for that session. The 640-row file above covers all turns
+# hypothetically; only the row matching each session's actual last turn is
+# the real submission (80 rows total). See session_archive/ for how this
+# was originally discovered (commit "Fix Blind-B submission: one prediction
+# per session at its last turn (80 rows)").
+echo "" | tee -a "$LOG"
+echo "[step 7] Filtering to one prediction per session (last turn)..." | tee -a "$LOG"
+PYTHONPATH=src python -c "
+import json
+from datasets import load_dataset
+
+bb = load_dataset('talkpl-ai/TalkPlayData-Challenge-${SPLIT}', split='test')
+last_turn = {}
+for item in bb:
+    sid = item['session_id']
+    last = item['conversations'][-1]
+    last_turn[sid] = (item['user_id'], int(last['turn_number']))
+print(f'${SPLIT} sessions: {len(last_turn)}')
+
+allpred = json.load(open('${OUT_DIR}/lgbm_with_responses_640.json'))
+idx = {(r['session_id'], int(r['turn_number'])): r for r in allpred}
+
+out, missing = [], []
+for sid, (uid, lt) in last_turn.items():
+    r = idx.get((sid, lt))
+    if r is None:
+        missing.append((sid, lt)); continue
+    out.append({
+        'session_id': sid, 'user_id': uid, 'turn_number': lt,
+        'predicted_track_ids': r['predicted_track_ids'][:20],
+        'predicted_response': r.get('predicted_response', ''),
+    })
+if missing:
+    print(f'ERROR: {len(missing)} sessions missing their last-turn prediction: {missing[:5]}')
+    raise SystemExit(1)
+assert all(len(r['predicted_track_ids']) <= 20 and len(set(r['predicted_track_ids'])) == len(r['predicted_track_ids']) for r in out)
+json.dump(out, open('${OUT_DIR}/predictions.json', 'w'), ensure_ascii=False)
+print(f'Wrote {len(out)} rows to ${OUT_DIR}/predictions.json (one per session, last turn)')
+" 2>&1 | tee -a "$LOG"
+
+# =============================================================================
+# Step 8: Validate submission format
 # =============================================================================
 echo "" | tee -a "$LOG"
-echo "[step 7] Validating..." | tee -a "$LOG"
+echo "[step 8] Validating..." | tee -a "$LOG"
 python -c "
 import json
 rows = json.load(open('${OUT_DIR}/predictions.json'))
@@ -212,10 +257,12 @@ for r in rows:
     ids = r.get('predicted_track_ids', [])
     if len(ids) > 20: issues.append('too many tracks')
     if len(set(ids)) != len(ids): issues.append('dupes')
+if len(rows) != len(sessions):
+    issues.append('row count != unique session count')
 if issues:
     print(f'ISSUES: {issues[:5]}')
 else:
-    print(f'OK: {len(sessions)} sessions, {len(rows)} rows, all <=20 unique tracks')
+    print(f'OK: {len(sessions)} sessions, {len(rows)} rows (one per session), all <=20 unique tracks')
     print(f'  Has responses: {sum(1 for r in rows if r.get(\"predicted_response\"))}/{len(rows)}')
 print(f'Submit: ${OUT_DIR}/predictions.json')
 " 2>&1 | tee -a "$LOG"
