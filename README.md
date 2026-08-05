@@ -12,11 +12,11 @@ All trained weights are public on Hugging Face: **[shuaih777/music-challenge-mod
 
 Multi-stage pipeline: **diverse retrieval → learned-to-rank fusion → response generation**.
 
-1. **13 retrieval legs** (BM25, pre-computed embeddings, 6 fine-tuned bi-encoders, PMI co-occurrence, multi-query variants) each produce top-100 candidates
+1. **14 retrieval legs** (BM25, pre-computed embeddings, 6 fine-tuned bi-encoders, PMI co-occurrence, multi-query variants, personalized bi-encoder) each produce top-100 candidates
 2. **LightGBM LambdaRank** reranks the union candidate pool (~200-400/turn) using per-leg rank, cosine scores, and metadata features
 3. **Qwen3-0.6B** generates natural language response explanations
 
-Key finding: **model diversity in retrieval** dominates all other improvements. Each bi-encoder with a different architecture (BGE, E5, Stella, NV-Embed-v2) adds +0.003–0.009 nDCG@20 via complementary recall.
+Key finding: **model diversity in retrieval** dominates all other improvements. Each bi-encoder with a different architecture (BGE, E5, Stella, NV-Embed-v2) adds +0.003–0.009 nDCG@20 via complementary recall. The 13-leg config (no personalization) is a strong, fully-reproducible baseline (Blind-B nDCG@20 = 0.24); adding a 14th leg — a bi-encoder fine-tuned with a `[age | gender | country]` query prefix — was *slightly worse* on devset but pushed the actual locked Blind-B submission to 0.25, illustrating that devset doesn't perfectly predict Blind-B for every leg.
 
 ---
 
@@ -30,7 +30,8 @@ Key finding: **model diversity in retrieval** dominates all other improvements. 
 | Our BM25 + no-repeat | 0.100 | 20.6% |
 | + LightGBM (9 legs) | 0.146 | 30.8% |
 | + Bi-encoder (BGE-large) | 0.165 | 35.2% |
-| **+ NV-Embed-v2 (13 legs)** | **0.185** | **39.1%** |
+| + NV-Embed-v2 (13 legs) | 0.185 | 39.1% |
+| **+ personalized bi-encoder (14 legs)** | 0.184 (slightly lower on devset — see note above) | 38.2% |
 
 ### Official Blind-B test set
 
@@ -63,7 +64,7 @@ See [REPRODUCE.md](REPRODUCE.md) for detailed instructions.
 
 ## Inference Pipeline: Blind-B → `predictions.json`
 
-All trained weights (6 bi-encoders + LightGBM reranker + PMI matrix) are published publicly, so you can run the full pipeline on a held-out split **without training anything**:
+All trained weights (7 bi-encoders + both LightGBM rerankers + PMI matrix) are published publicly, so you can run the full pipeline on a held-out split **without training anything**:
 
 👉 **[huggingface.co/shuaih777/music-challenge-models](https://huggingface.co/shuaih777/music-challenge-models)**
 
@@ -72,7 +73,7 @@ Blind-Dataset-B (talkpl-ai/TalkPlayData-Challenge-Blind-B)
         │
         ▼
 ┌────────────────────────────────────────────────────────────┐
-│  13 retrieval legs → top-100 candidates each                │
+│  14 retrieval legs → top-100 candidates each                │
 │  • sparse:  BM25 (no-repeat)                                 │
 │  • dense (frozen embeddings): metadata-qwen3, cf_bpr,        │
 │    decay_descending                                          │
@@ -81,11 +82,12 @@ Blind-Dataset-B (talkpl-ai/TalkPlayData-Challenge-Blind-B)
 │    stella, mxbai, NV-Embed-v2 (LoRA)                          │
 │  • 2 multi-query variants of bge-large (last-2-turns,          │
 │    current-utterance-only)                                    │
+│  • personalized bi-encoder (bge-large + demographic prefix)    │
 └────────────────────────────────────────────────────────────┘
         │  union candidate pool (~200-400 tracks/turn)
         ▼
 ┌────────────────────────────────────────────────────────────┐
-│  LightGBM LambdaRank reranker (lgbm_reproduce.txt)            │
+│  LightGBM LambdaRank reranker (lgbm_reproduce_14leg.txt)       │
 │  features: per-leg rank + RRF score, bi-encoder cosine,       │
 │  track popularity, turn number, PMI sum, #legs agreeing        │
 └────────────────────────────────────────────────────────────┘
@@ -96,7 +98,10 @@ Blind-Dataset-B (talkpl-ai/TalkPlayData-Challenge-Blind-B)
 └────────────────────────────────────────────────────────────┘
         │
         ▼
-   predictions.json   (N sessions × 8 turns, submit to Codabench)
+   predictions.json   (one row per session, at its final observed
+                        turn — Blind-B sessions are pre-truncated to
+                        varying lengths, so it's one prediction per
+                        session, not one per turn)
 ```
 
 ### Run it
@@ -110,17 +115,17 @@ from huggingface_hub import snapshot_download
 snapshot_download(repo_id='shuaih777/music-challenge-models', local_dir='.hf_download')
 "
 mkdir -p out exp/ltr
-mv .hf_download/{biencoder,biencoder_large,e5_large,biencoder_mxbai,biencoder_stella,biencoder_nv_embed} out/
-mv .hf_download/reranker/lgbm_reproduce.txt exp/ltr/
+mv .hf_download/{biencoder,biencoder_large,e5_large,biencoder_mxbai,biencoder_stella,biencoder_nv_embed,biencoder_personalized} out/
+mv .hf_download/reranker/lgbm_reproduce_14leg.txt .hf_download/reranker/lgbm_reproduce.txt exp/ltr/
 mv .hf_download/pmi/* exp/
 rm -rf .hf_download
 
-# 2. Run the 13-leg pipeline against Blind-B
-bash scripts/run_blind_b_13leg.sh
-# → exp/inference/blind_b_13leg/predictions.json
+# 2. Run the 13-leg base legs, then extend to the 14-leg (final) pipeline
+bash scripts/run_blind_b_13leg.sh   # → exp/inference/blind_b_13leg/predictions.json (13-leg baseline, Blind-B 0.24)
+bash scripts/run_blind_b_14leg.sh   # → exp/inference/blind_b_13leg/predictions_14leg.json (final submission, Blind-B 0.25)
 ```
 
-`run_blind_b_13leg.sh` mirrors `reproduce.sh` step-for-step (same 13 legs, same reranker) but targets `talkpl-ai/TalkPlayData-Challenge-Blind-B` and skips training — every step is inference-only, so no GPU-hours beyond encoding queries and generating responses.
+`run_blind_b_14leg.sh` is the pipeline that produced the actual locked final submission — it reuses the 13 base legs from `run_blind_b_13leg.sh`, adds the personalized bi-encoder as a 14th leg, and reranks with `lgbm_reproduce_14leg.txt`. Both scripts mirror `reproduce.sh` step-for-step but target `talkpl-ai/TalkPlayData-Challenge-Blind-B` and skip training — every step is inference-only, so no GPU-hours beyond encoding queries and generating responses.
 
 ---
 
