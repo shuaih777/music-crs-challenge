@@ -24,6 +24,7 @@ cache/
 exp/inference/devset/*.json.tmp
 exp/states/test_qwen3_emb_*.npz
 exp/tracks/*.npz
+exp/tracks/*.npy
 logs/*.log
 data/*.jsonl
 out/
